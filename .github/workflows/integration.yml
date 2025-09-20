@@ -18,6 +18,7 @@ jobs:
         uses: benbalter/last-run-action@main
         with:
           mode: get
+          fail-if-missing: true
 
       - name: Echo last run
         run: |
