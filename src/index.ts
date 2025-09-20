@@ -13,14 +13,15 @@ export async function run(): Promise<void> {
   try {
     const { mode, failIfMissing, operations } = collectInputs();
     core.debug(`Effective operations: ${JSON.stringify(operations)} (mode='${mode}')`);
+    let retrieved: string | null = null;
     if (operations.get) {
       core.startGroup('Retrieve last run timestamp');
-      await maybeGetLastRun(operations.get, failIfMissing);
+      retrieved = await maybeGetLastRun(operations.get, failIfMissing);
       core.endGroup();
     }
     if (operations.set) {
       core.startGroup('Store current timestamp');
-      await maybeSetLastRun(operations.set);
+      await maybeSetLastRun(operations.set, retrieved);
       core.endGroup();
     }
   } catch (error: any) {
@@ -51,30 +52,43 @@ function collectInputs(): CollectedInputs {
  * Conditionally retrieves the previous run timestamp, emitting it as an output or
  * failing the action if required and not found.
  */
-async function maybeGetLastRun(doGet: boolean, failIfMissing: boolean): Promise<void> {
+async function maybeGetLastRun(doGet: boolean, failIfMissing: boolean): Promise<string | null> {
   core.debug(`maybeGetLastRun: doGet=${doGet} failIfMissing=${failIfMissing}`);
-  if (!doGet) return;
+  if (!doGet) return null;
   const retrieved = await downloadTimestampWithValidation();
   core.debug(`maybeGetLastRun: retrieved='${retrieved}'`);
   if (retrieved) {
     core.setOutput('last-run', retrieved);
     core.info(`Last run timestamp: ${retrieved}`);
-    return;
+    return retrieved;
   }
   const msg = 'No valid previous run timestamp found.';
   if (failIfMissing) {
     core.debug('maybeGetLastRun: failing due to missing timestamp');
     core.setFailed(msg);
-    return;
+    return null;
   }
   core.debug('maybeGetLastRun: missing timestamp but not failing');
   core.warning(msg);
+  return null;
 }
 
-async function maybeSetLastRun(doSet: boolean): Promise<void> {
-  core.debug(`maybeSetLastRun: doSet=${doSet}`);
+async function maybeSetLastRun(doSet: boolean, previous: string | null): Promise<void> {
+  core.debug(`maybeSetLastRun: doSet=${doSet} previous='${previous}'`);
   if (!doSet) return;
-  const now = new Date().toISOString();
+  let now = new Date().toISOString();
+  // Ensure monotonic increase when previous exists (avoid identical timestamps on fast successive sets)
+  if (previous) {
+    // Loop until we get a strictly greater ISO string (lexicographically greater since format is sortable)
+    let safeguard = 0;
+    while (now <= previous && safeguard < 1000) {
+      now = new Date().toISOString();
+      safeguard++;
+    }
+    if (safeguard > 0) {
+      core.debug(`maybeSetLastRun: waited ${safeguard} iterations to ensure monotonic timestamp`);
+    }
+  }
   core.debug(`maybeSetLastRun: uploading timestamp ${now}`);
   await uploadTimestamp(now);
   core.info(`Stored last run timestamp: ${now}`);
@@ -187,20 +201,28 @@ export async function extractArtifactContent(downloadResponse: any): Promise<str
   );
   const fileDir = downloadResponse.downloadPath || process.cwd();
   const targetPath = path.join(fileDir, FILENAME);
+  // If a zip filename is provided, prefer extracting from the zip first to avoid stale plain file collisions.
+  if (downloadResponse.artifactFilename) {
+    core.debug('extractArtifactContent: zip filename present, prioritizing zip extraction');
+    const fromZip = await extractFromZip(fileDir, downloadResponse.artifactFilename as string);
+    if (fromZip !== null) {
+      core.debug('extractArtifactContent: successfully read content from zip');
+      return fromZip;
+    }
+    core.debug(
+      'extractArtifactContent: zip extraction returned null, falling back to plain file if present',
+    );
+  }
   try {
     await fs.access(targetPath);
     core.debug('extractArtifactContent: found plain file');
+    const content = await fs.readFile(targetPath, 'utf8');
+    core.debug('extractArtifactContent: file read complete');
+    return content.trim();
   } catch {
-    if (downloadResponse.artifactFilename) {
-      core.debug('extractArtifactContent: attempting zip extraction');
-      return extractFromZip(fileDir, downloadResponse.artifactFilename as string);
-    }
-    core.debug('extractArtifactContent: no file or zip present');
+    core.debug('extractArtifactContent: no readable content found (neither zip nor file)');
     return null;
   }
-  const content = await fs.readFile(targetPath, 'utf8');
-  core.debug('extractArtifactContent: file read complete');
-  return content.trim();
 }
 
 export async function extractFromZip(dir: string, zipName: string): Promise<string | null> {
