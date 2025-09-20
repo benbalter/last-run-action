@@ -1,0 +1,43 @@
+name: Integration Test (Last Run Action)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build action
+        run: npm run build
+
+      - name: Get last run timestamp
+        id: last-run
+        uses: ./
+        with:
+          mode: get
+
+      - name: Echo last run
+        run: |
+          echo "Previous run timestamp: ${{ steps.last-run.outputs.last-run }}"
+
+      - name: Store current timestamp
+        uses: ./
+        with:
+          mode: set

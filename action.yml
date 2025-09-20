@@ -1,0 +1,21 @@
+name: 'Last Run Action'
+description: 'Determine when a workflow was last run and/or update the last run time.'
+author: 'Generated'
+branding:
+  color: 'blue'
+  icon: 'clock'
+inputs:
+  mode:
+    description: "Operation mode: 'get', 'set', or 'get-and-set'."
+    required: true
+    default: 'get'
+  fail-if-missing:
+    description: 'If true and no previous timestamp is found (or invalid), the action fails.'
+    required: false
+    default: 'false'
+outputs:
+  last-run:
+    description: 'The last time the workflow was run, in ISO 8601 format.'
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
