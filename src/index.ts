@@ -68,7 +68,7 @@ async function maybeGetLastRun(doGet: boolean, failIfMissing: boolean): Promise<
     return;
   }
   core.debug('maybeGetLastRun: missing timestamp but not failing');
-  core.info(msg);
+  core.warning(msg);
 }
 
 async function maybeSetLastRun(doSet: boolean): Promise<void> {
