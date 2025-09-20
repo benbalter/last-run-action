@@ -13,31 +13,17 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build action
-        run: npm run build
-
-      - name: Get last run timestamp
-        id: last-run
-        uses: ./
+      - name: Get last run
+        id: get
+        uses: benbalter/last-run-action@main
         with:
           mode: get
 
       - name: Echo last run
         run: |
-          echo "Previous run timestamp: ${{ steps.last-run.outputs.last-run }}"
+          echo "Previous run timestamp: ${{ steps.get.outputs.last-run }}"
 
-      - name: Store current timestamp
-        uses: ./
+      - name: Set last run
+        uses: benbalter/last-run-action@main
         with:
           mode: set
