@@ -18,7 +18,7 @@ jobs:
         uses: benbalter/last-run-action@main
         with:
           mode: get
-          fail-if-missing: false
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Echo last run
         run: |
@@ -28,4 +28,3 @@ jobs:
         uses: benbalter/last-run-action@main
         with:
           mode: set
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
