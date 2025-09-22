@@ -51,7 +51,6 @@ function mockRepoArtifact(options: {
   created_at?: string;
   expired?: boolean;
   content?: string | null;
-  pages?: number;
   additionalArtifacts?: Array<{ id: number; created_at: string; expired?: boolean }>;
 }) {
   const {
@@ -59,7 +58,6 @@ function mockRepoArtifact(options: {
     created_at = new Date().toISOString(),
     expired = false,
     content = created_at,
-    pages = 1,
     additionalArtifacts = [],
   } = options;
   process.env.GITHUB_TOKEN = 'token';
@@ -79,15 +77,7 @@ function mockRepoArtifact(options: {
       archive_download_url: `GET /repos/o/r/actions/artifacts/${a.id}/zip`,
     })),
   ];
-  if (pages === 1) {
-    listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: artifactsPage } });
-  } else {
-    // First page single oldest, second page remaining including target latest
-    const first = [artifactsPage[0]];
-    const rest = artifactsPage.slice(1);
-    listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: first } });
-    listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: rest } });
-  }
+  listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: artifactsPage } });
   if (content !== undefined) {
     const data = content === null ? zipWith(null) : zipWith(content);
     requestMock.mockResolvedValueOnce({ data });
@@ -224,55 +214,6 @@ test('expired artifacts ignored (no viable)', async () => {
   expect(coreMock.setOutput).not.toHaveBeenCalled();
 });
 
-test('pagination: second page supplies artifact', async () => {
-  jest.clearAllMocks();
-  coreMock.getInput.mockImplementation(
-    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
-  );
-  coreMock.getBooleanInput.mockImplementation(
-    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] === 'true',
-  );
-  process.env.GITHUB_TOKEN = 'token';
-  const page1Ts = new Date(Date.now() - 60000).toISOString();
-  const page2Ts = new Date().toISOString();
-  // Page 1: exactly 100 artifacts, only a non-matching name to force pagination
-  const page1 = Array.from({ length: 100 }).map((_, i) => ({
-    id: 6000 + i,
-    name: 'other',
-    created_at: page1Ts,
-    expired: false,
-    archive_download_url: `GET /repos/o/r/actions/artifacts/${6000 + i}/zip`,
-  }));
-  listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: page1 } });
-  // Page 2: include two last-run artifacts, newest picked
-  listArtifactsMock.mockResolvedValueOnce({
-    data: {
-      artifacts: [
-        {
-          id: 7000,
-          name: 'last-run',
-          created_at: page1Ts,
-          expired: false,
-          archive_download_url: 'GET /repos/o/r/actions/artifacts/7000/zip',
-        },
-        {
-          id: 7001,
-          name: 'last-run',
-          created_at: page2Ts,
-          expired: false,
-          archive_download_url: 'GET /repos/o/r/actions/artifacts/7001/zip',
-        },
-      ],
-    },
-  });
-  // Only the newest (page2Ts) should be downloaded; our code picks latest after sorting
-  requestMock.mockResolvedValueOnce({ data: zipWith(page2Ts) });
-  setInputs({ mode: 'get' });
-  await run();
-  const outputCall = (coreMock.setOutput as jest.Mock).mock.calls.find((c) => c[0] === 'last-run');
-  expect(outputCall && outputCall[1]).toBe(page2Ts);
-});
-
 test('missing file inside zip returns no output', async () => {
   jest.clearAllMocks();
   coreMock.getInput.mockImplementation(
@@ -334,7 +275,7 @@ test('downloadArtifactArchive missing token after discovery returns null (no out
   expect((coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
 });
 
-test('listAllRepoArtifactsByName no token path returns empty (indirectly no output)', async () => {
+test('listRepoArtifactsByName no token path returns empty (indirectly no output)', async () => {
   // Ensure no token present
   delete process.env.GITHUB_TOKEN;
   jest.clearAllMocks();
