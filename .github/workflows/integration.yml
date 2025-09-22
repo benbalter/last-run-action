@@ -16,6 +16,8 @@ jobs:
       - name: Get last run
         id: get
         uses: benbalter/last-run-action@main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           mode: get
           fail-if-missing: 'true'
