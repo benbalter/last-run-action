@@ -246,7 +246,7 @@ interface RepoArtifactSummary {
  * @returns Array of matching artifact summaries, empty if none found or no token available
  */
 async function listRepoArtifactsByName(name: string): Promise<RepoArtifactSummary[]> {
-  const token = process.env['GITHUB_TOKEN'] || process.env['ACTIONS_RUNTIME_TOKEN'];
+  const token = core.getInput("GITHUB_TOKEN");
   if (!token) {
     core.debug('listRepoArtifactsByName: no token available, skipping repo-level lookup');
     return [];
@@ -335,7 +335,7 @@ async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
  * @returns Path to the downloaded ZIP file or null if download fails
  */
 async function downloadArtifactArchive(latest: LatestArtifactMeta): Promise<string | null> {
-  const token = process.env['GITHUB_TOKEN'] || process.env['ACTIONS_RUNTIME_TOKEN'];
+  const token = core.getInput("GITHUB_TOKEN");
   if (!token) {
     core.debug('downloadArtifactArchive: missing token');
     return null;
