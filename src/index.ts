@@ -1,10 +1,9 @@
 import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
+import * as github from '@actions/github';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import AdmZip from 'adm-zip';
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const retry = require('async-retry');
 
 const ARTIFACT_NAME = 'last-run';
 const FILENAME = 'last-run.txt';
@@ -121,125 +120,7 @@ export async function uploadTimestamp(value: string): Promise<void> {
   core.debug(`uploadTimestamp: uploaded artifact '${ARTIFACT_NAME}'`);
 }
 
-export async function downloadTimestamp(): Promise<string | null> {
-  core.debug('downloadTimestamp: start');
-  try {
-    const client = new DefaultArtifactClient();
-    const found = await findArtifact(client);
-    core.debug(`downloadTimestamp: artifactFound=${!!found}`);
-    if (!found) return null;
-    core.startGroup('Download last-run artifact');
-    const downloadResponse = await downloadArtifactPayload(client, found.id);
-    core.debug('downloadTimestamp: downloaded artifact, extracting');
-    const result = await extractArtifactContent(downloadResponse);
-    core.endGroup();
-    return result;
-  } catch (e: any) {
-    core.warning(`Unable to retrieve last run artifact: ${e.message || e}`);
-    core.debug('downloadTimestamp: error encountered, returning null');
-    return null;
-  }
-}
-
-interface ListedArtifact {
-  id: number;
-  name: string;
-}
-
-export async function findArtifact(
-  client: DefaultArtifactClient,
-): Promise<ListedArtifact | undefined> {
-  core.debug('findArtifact: listing artifacts with retry');
-  const list = await retry(
-    async (bail: (e: Error) => void, attempt: number) => {
-      try {
-        return await client.listArtifacts();
-      } catch (err: any) {
-        core.debug(`listArtifacts attempt ${attempt} failed: ${err.message || err}`);
-        throw err;
-      }
-    },
-    {
-      retries: 2,
-      factor: 2,
-      minTimeout: 250,
-      maxTimeout: 1000,
-      randomize: false,
-    },
-  );
-  core.debug(`findArtifact: totalArtifacts=${list.artifacts.length}`);
-  return list.artifacts.find((a: any) => a.name === ARTIFACT_NAME);
-}
-
-export async function downloadArtifactPayload(
-  client: DefaultArtifactClient,
-  artifactId: number,
-): Promise<any> {
-  core.debug(`downloadArtifactPayload: artifactId=${artifactId}`);
-  return retry(
-    async (bail: (e: Error) => void, attempt: number) => {
-      try {
-        return await client.downloadArtifact(artifactId, { path: process.cwd() } as any);
-      } catch (err: any) {
-        core.debug(`downloadArtifact attempt ${attempt} failed: ${err.message || err}`);
-        throw err;
-      }
-    },
-    {
-      retries: 2,
-      factor: 2,
-      minTimeout: 400,
-      maxTimeout: 1500,
-      randomize: false,
-    },
-  );
-}
-
-export async function extractArtifactContent(downloadResponse: any): Promise<string | null> {
-  core.debug(
-    `extractArtifactContent: downloadPath='${downloadResponse.downloadPath}' zip='${downloadResponse.artifactFilename}'`,
-  );
-  const fileDir = downloadResponse.downloadPath || process.cwd();
-  const targetPath = path.join(fileDir, FILENAME);
-  // If a zip filename is provided, prefer extracting from the zip first to avoid stale plain file collisions.
-  if (downloadResponse.artifactFilename) {
-    core.debug('extractArtifactContent: zip filename present, prioritizing zip extraction');
-    const fromZip = await extractFromZip(fileDir, downloadResponse.artifactFilename as string);
-    if (fromZip !== null) {
-      core.debug('extractArtifactContent: successfully read content from zip');
-      return fromZip;
-    }
-    core.debug(
-      'extractArtifactContent: zip extraction returned null, falling back to plain file if present',
-    );
-  }
-  try {
-    await fs.access(targetPath);
-    core.debug('extractArtifactContent: found plain file');
-    const content = await fs.readFile(targetPath, 'utf8');
-    core.debug('extractArtifactContent: file read complete');
-    return content.trim();
-  } catch {
-    core.debug('extractArtifactContent: no readable content found (neither zip nor file)');
-    return null;
-  }
-}
-
-export async function extractFromZip(dir: string, zipName: string): Promise<string | null> {
-  core.debug(`extractFromZip: dir='${dir}' zip='${zipName}'`);
-  const zipPath = path.join(dir, zipName);
-  try {
-    const zip = new AdmZip(zipPath);
-    const entry = zip.getEntry(FILENAME);
-    if (!entry) return null;
-    core.debug('extractFromZip: entry found');
-    return zip.readAsText(entry).trim();
-  } catch (zipErr: any) {
-    core.warning(`Failed to extract zip: ${zipErr.message || zipErr}`);
-    core.debug('extractFromZip: extraction failed');
-    return null;
-  }
-}
+// Removed per-run artifact retrieval logic; repository-level lookup is now primary.
 
 // Validate ISO 8601 basic (YYYY-MM-DDTHH:mm:ss.sssZ) – allow variable precision
 const ISO_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
@@ -274,6 +155,123 @@ async function downloadTimestampWithValidation(): Promise<string | null> {
   core.debug('downloadTimestampWithValidation: success');
   core.endGroup();
   return value!;
+}
+
+interface RepoArtifactSummary {
+  id: number;
+  name: string;
+  created_at: string;
+  expired: boolean;
+  archive_download_url: string;
+}
+
+async function listAllRepoArtifactsByName(name: string): Promise<RepoArtifactSummary[]> {
+  const token = process.env['GITHUB_TOKEN'] || process.env['ACTIONS_RUNTIME_TOKEN'];
+  if (!token) {
+    core.debug('listAllRepoArtifactsByName: no token available, skipping repo-level lookup');
+    return [];
+  }
+  const octokit = github.getOctokit(token);
+  const { owner, repo } = github.context.repo;
+  const per_page = 100;
+  let page = 1;
+  const matches: RepoArtifactSummary[] = [];
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    core.debug(`listAllRepoArtifactsByName: fetching page ${page}`);
+    const resp = await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, page });
+    const artifacts = resp.data.artifacts as any[];
+    for (const a of artifacts) {
+      if (a.name === name) {
+        matches.push({
+          id: a.id,
+          name: a.name,
+          created_at: a.created_at,
+          expired: !!a.expired,
+          archive_download_url: a.archive_download_url,
+        });
+      }
+    }
+    if (artifacts.length < per_page) break; // last page
+    page++;
+    if (page > 10) {
+      // safety cap (1000 artifacts)
+      core.debug('listAllRepoArtifactsByName: reached page cap, stopping');
+      break;
+    }
+  }
+  core.debug(`listAllRepoArtifactsByName: total matches=${matches.length}`);
+  return matches;
+}
+
+export async function downloadTimestamp(): Promise<string | null> {
+  try {
+    const latest = await fetchLatestRepoArtifact();
+    if (!latest) return null;
+    const zipPath = await downloadArtifactArchive(latest);
+    if (!zipPath) return null;
+    return await extractTimestampFromZip(zipPath);
+  } catch (err: any) {
+    core.warning(`Repo-level artifact lookup failed: ${err.message || err}`);
+    return null;
+  }
+}
+
+interface LatestArtifactMeta {
+  id: number;
+  created_at: string;
+  archive_download_url: string;
+}
+
+async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
+  const artifacts = await listAllRepoArtifactsByName(ARTIFACT_NAME);
+  if (!artifacts.length) {
+    core.debug('fetchLatestRepoArtifact: no repo-level artifacts found');
+    return null;
+  }
+  const viable = artifacts.filter((a) => !a.expired);
+  if (!viable.length) {
+    core.debug('fetchLatestRepoArtifact: only expired artifacts found');
+    return null;
+  }
+  viable.sort((a, b) => a.created_at.localeCompare(b.created_at));
+  const latest = viable[viable.length - 1];
+  core.debug(`fetchLatestRepoArtifact: chosen id=${latest.id} created_at=${latest.created_at}`);
+  return latest;
+}
+
+async function downloadArtifactArchive(latest: LatestArtifactMeta): Promise<string | null> {
+  const token = process.env['GITHUB_TOKEN'] || process.env['ACTIONS_RUNTIME_TOKEN'];
+  if (!token) {
+    core.debug('downloadArtifactArchive: missing token');
+    return null;
+  }
+  const octokit = github.getOctokit(token);
+  const resp = await octokit.request(latest.archive_download_url, {
+    headers: { Accept: 'application/zip' },
+  });
+  const tempDir = process.env['RUNNER_TEMP'] || process.cwd();
+  const zipPath = path.join(tempDir, `repo-artifact-${latest.id}.zip`);
+  await fs.writeFile(zipPath, Buffer.from(resp.data as ArrayBuffer));
+  core.debug(`downloadArtifactArchive: wrote ${zipPath}`);
+  return zipPath;
+}
+
+async function extractTimestampFromZip(zipPath: string): Promise<string | null> {
+  try {
+    const zip = new AdmZip(zipPath);
+    const entry = zip.getEntry(FILENAME);
+    if (!entry) {
+      core.debug('extractTimestampFromZip: entry not found');
+      return null;
+    }
+    const content = zip.readAsText(entry).trim();
+    core.debug('extractTimestampFromZip: extracted timestamp');
+    return content;
+  } catch (err: any) {
+    core.warning(`Failed to extract zip: ${err.message || err}`);
+    return null;
+  }
 }
 
 // Removed custom retryAsync in favor of async-retry for clearer semantics and backoff handling.

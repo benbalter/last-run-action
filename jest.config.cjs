@@ -9,4 +9,12 @@ module.exports = {
   collectCoverage: true,
   collectCoverageFrom: ['src/**/*.ts', '!src/types.d.ts'],
   coverageReporters: ['text', 'lcov'],
+  coverageThreshold: {
+    global: {
+      statements: 90,
+      branches: 60,
+      functions: 95,
+      lines: 90,
+    },
+  },
 };

@@ -48,7 +48,42 @@ Inputs:
 
 ## How it works
 
-This Action uses GitHub Actions Artifacts to store the last time a Workflow was run.
+This Action stores the most recent run timestamp in a GitHub Actions artifact named `last-run` containing a single file `last-run.txt` with an ISO 8601 UTC timestamp. Retrieval proceeds in two tiers:
+
+1. Current-run scope: It first attempts to locate an artifact produced earlier in the SAME workflow run (useful for multi-job workflows where one job sets and another gets).
+2. Repository-wide fallback: If no current-run artifact is found, it uses the GitHub REST API (`GET /repos/{owner}/{repo}/actions/artifacts`) to list repository artifacts, filters for non-expired artifacts named `last-run`, and selects the newest by `created_at`. It then downloads the artifact archive and extracts `last-run.txt`.
+
+If both lookups fail, the timestamp is considered missing.
+
+### Permissions
+
+Minimum recommended permissions:
+
+```yaml
+permissions:
+  actions: read # needed to list / download existing artifacts (fallback)
+  contents: read # typical default, not strictly required by this action itself
+```
+
+Add `actions: write` when you use modes that upload (`set` or `get-and-set`). Without write permission, uploads will fail and the action will report the error.
+
+### Behavior summary
+
+| Mode                               | Reads previous | Outputs `last-run`     | Uploads new timestamp |
+| ---------------------------------- | -------------- | ---------------------- | --------------------- |
+| get                                | Yes            | Yes (if found & valid) | No                    |
+| set                                | No             | No                     | Yes                   |
+| get-and-set / getset / get_and_set | Yes            | Yes (previous)         | Yes (new)             |
+
+Aliases `getset` and `get_and_set` behave identically to `get-and-set`.
+
+### Cross-run fallback rationale
+
+Artifacts listed by the SDK client are scoped to the current run; relying solely on that would fail on the very first step of a new run. The repository-level fallback allows true _cross-run_ persistence without needing to commit a file back to the repository or misuse caches. Expired artifacts (per retention policy) are skipped.
+
+### Fail-if-missing semantics
+
+`fail-if-missing: true` only triggers failure after BOTH current-run lookup and repository-wide fallback fail to yield a valid ISO timestamp (or a retrieved value fails validation). Any invalid or unparsable timestamp is treated as missing.
 
 ## Use cases
 
@@ -58,15 +93,15 @@ This Action uses GitHub Actions Artifacts to store the last time a Workflow was 
 
 ## Implementation notes
 
-This Action stores a single `last-run.txt` file inside an artifact named `last-run`. In `set` or `get-and-set` modes the artifact is (re)created with the current timestamp in ISO 8601 format. In `get` or `get-and-set` modes the Action downloads the artifact (if present) and outputs its contents as `last-run`.
-
-Because artifacts are persisted across workflow runs, the prior timestamp is discoverable via the Actions artifacts service. The Action requires `actions: read` permission to fetch and `actions: write` to upload when using `set` or `get-and-set`.
-
-If no prior run exists, the output `last-run` will be empty and the Action logs that no previous timestamp was found. When `fail-if-missing: true`, the Action fails instead.
+The artifact format and fallback layering are designed to minimize false negatives while avoiding repository history churn. If no prior run exists, the output is omitted (and a warning logged); with `fail-if-missing: true` the action fails in that case.
 
 ### Timestamp validation
 
-Retrieved timestamps are validated to be ISO 8601 UTC form (`YYYY-MM-DDTHH:mm:ss(.fraction)Z`). Any malformed value in the artifact is treated as missing (and will trigger `fail-if-missing` if enabled).
+Retrieved values must match the regex `YYYY-MM-DDTHH:mm:ss(.fraction)?Z` and be parseable by `Date.parse`. Pattern or parse failures emit a warning and treat the value as missing.
+
+### Monotonic updates
+
+When using `get-and-set`, a new timestamp is generated after reading the previous one. The action ensures the new timestamp is strictly greater (lexicographically) than the previous to avoid identical millisecond collisions in very fast runs.
 
 ### Combined mode advantages
 
@@ -74,7 +109,7 @@ Using `mode: get-and-set` in a single step lets you capture the prior value and 
 
 ### Retry logic
 
-Artifact list/download operations are retried with exponential backoff to mitigate transient service errors (2 retry attempts each). Failures after retries result in a warning (or failure if `fail-if-missing` applies and no valid timestamp is ultimately found).
+Artifact list/download operations (current-run scope) and downloads are retried with exponential backoff (async-retry, 2 attempts). Repository-level listing is not currently retried; transient failures there fall back to a warning and a missing result.
 
 ### Versioning
 

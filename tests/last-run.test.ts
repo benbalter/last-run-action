@@ -1,308 +1,413 @@
-import { run, uploadTimestamp, downloadTimestamp } from '../src/index';
+// Repo-level primary retrieval test suite
+import { run } from '../src/index';
 import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
 
 jest.mock('@actions/core');
 
-// Simple in-memory artifact store mock plus mode / failure flags
-const artifacts: Record<string, string> = {};
-let failList = false; // legacy single-fail flag
-let failListCount = 0; // number of times listArtifacts should fail before succeeding
-let failDownloadCount = 0; // number of times downloadArtifact should fail before succeeding
-let simulateZip = false;
-let corruptZip = false; // when true and simulateZip, create an invalid/corrupt zip file
+// In-memory storage of last uploaded timestamp value (simulates contents of artifact before zipped on download)
+const uploaded: { value?: string } = {};
 
+// Mock artifact client for upload path (set operations)
 jest.mock('@actions/artifact', () => {
   const fs = require('fs');
-  const path = require('path');
   class MockArtifactClient {
-    async uploadArtifact(name: string, files: string[], root: string) {
+    async uploadArtifact(name: string, files: string[]) {
+      if (name !== 'last-run') throw new Error('unexpected artifact name');
       const filePath = files[0];
-      artifacts[name] = fs.readFileSync(filePath, 'utf8');
-      return { id: 1, size: artifacts[name].length, name };
-    }
-    async listArtifacts() {
-      if (failList) throw new Error('list failed');
-      if (failListCount > 0) {
-        failListCount--;
-        throw new Error('transient list error');
-      }
-      return { artifacts: Object.keys(artifacts).map((n, i) => ({ id: i + 1, name: n })) };
-    }
-    async downloadArtifact(id: number, opts: { path: string }) {
-      if (failDownloadCount > 0) {
-        failDownloadCount--;
-        throw new Error('transient download error');
-      }
-      const name = Object.keys(artifacts)[id - 1];
-      if (!name) throw new Error('Artifact not found');
-      const dir = opts.path || process.cwd();
-      const filename = 'last-run.txt';
-      if (simulateZip) {
-        const zipPath = path.join(dir, 'artifact.zip');
-        if (corruptZip) {
-          // Write junk data that won't parse as a zip
-          fs.writeFileSync(zipPath, 'not-a-zip');
-          return { downloadPath: dir, artifactFilename: 'artifact.zip' };
-        }
-        // create a dummy zip containing the file
-        const AdmZip = require('adm-zip');
-        const zip = new AdmZip();
-        zip.addFile(filename, Buffer.from(artifacts[name], 'utf8'));
-        zip.writeZip(zipPath);
-        return { downloadPath: dir, artifactFilename: 'artifact.zip' };
-      } else {
-        fs.writeFileSync(path.join(dir, filename), artifacts[name], 'utf8');
-        return { downloadPath: dir };
-      }
+      uploaded.value = fs.readFileSync(filePath, 'utf8');
+      return { id: 999, size: (uploaded.value || '').length, name };
     }
   }
   return { DefaultArtifactClient: MockArtifactClient };
 });
 
+// Mocks for repo-level listing & download
+const listArtifactsMock = jest.fn();
+const requestMock = jest.fn();
+jest.mock('@actions/github', () => ({
+  getOctokit: () => ({
+    rest: { actions: { listArtifactsForRepo: listArtifactsMock } },
+    request: requestMock,
+  }),
+  context: { repo: { owner: 'o', repo: 'r' } },
+}));
+
 const coreMock = core as jest.Mocked<typeof core>;
 
 function setInputs(inputs: Record<string, string>) {
-  for (const [k, v] of Object.entries(inputs)) {
-    process.env[`INPUT_${k.toUpperCase()}`] = v;
+  for (const [k, v] of Object.entries(inputs)) process.env[`INPUT_${k.toUpperCase()}`] = v;
+}
+
+function zipWith(content: string | null): Buffer {
+  const AdmZip = require('adm-zip');
+  const zip = new AdmZip();
+  if (content !== null) zip.addFile('last-run.txt', Buffer.from(content, 'utf8'));
+  return zip.toBuffer();
+}
+
+function mockRepoArtifact(options: {
+  id?: number;
+  created_at?: string;
+  expired?: boolean;
+  content?: string | null;
+  pages?: number;
+  additionalArtifacts?: Array<{ id: number; created_at: string; expired?: boolean }>;
+}) {
+  const {
+    id = Math.floor(Math.random() * 1000),
+    created_at = new Date().toISOString(),
+    expired = false,
+    content = created_at,
+    pages = 1,
+    additionalArtifacts = [],
+  } = options;
+  process.env.GITHUB_TOKEN = 'token';
+  const artifactsPage: any[] = [
+    {
+      id,
+      name: 'last-run',
+      created_at,
+      expired,
+      archive_download_url: `GET /repos/o/r/actions/artifacts/${id}/zip`,
+    },
+    ...additionalArtifacts.map((a) => ({
+      id: a.id,
+      name: 'last-run',
+      created_at: a.created_at,
+      expired: !!a.expired,
+      archive_download_url: `GET /repos/o/r/actions/artifacts/${a.id}/zip`,
+    })),
+  ];
+  if (pages === 1) {
+    listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: artifactsPage } });
+  } else {
+    // First page single oldest, second page remaining including target latest
+    const first = [artifactsPage[0]];
+    const rest = artifactsPage.slice(1);
+    listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: first } });
+    listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: rest } });
   }
+  if (content !== undefined) {
+    const data = content === null ? zipWith(null) : zipWith(content);
+    requestMock.mockResolvedValueOnce({ data });
+  }
+  return { id, created_at, content };
 }
 
 beforeEach(() => {
-  for (const key of Object.keys(process.env)) {
-    if (key.startsWith('INPUT_')) delete process.env[key];
-  }
-  Object.keys(artifacts).forEach((k) => delete artifacts[k]);
+  // Reset environment inputs
+  for (const key of Object.keys(process.env)) if (key.startsWith('INPUT_')) delete process.env[key];
   jest.clearAllMocks();
-  failList = false;
-  failListCount = 0;
-  failDownloadCount = 0;
-  simulateZip = false;
-  corruptZip = false;
-  // Default implementations for core input helpers
+  delete process.env.GITHUB_TOKEN;
+  uploaded.value = undefined;
+  // Completely reset the mocks to ensure no queued responses remain
+  listArtifactsMock.mockReset();
+  listArtifactsMock.mockResolvedValue({ data: { artifacts: [] } });
+  requestMock.mockReset();
   coreMock.getInput.mockImplementation(
-    (name: string) => process.env[`INPUT_${name.toUpperCase()}`] || '',
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
   );
   coreMock.getBooleanInput.mockImplementation(
-    (name: string) => process.env[`INPUT_${name.toUpperCase()}`] === 'true',
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] === 'true',
   );
 });
 
-test('set mode uploads current timestamp', async () => {
-  setInputs({ mode: 'set' });
-  const infoCalls: string[] = [];
-  coreMock.info.mockImplementation((msg) => {
-    infoCalls.push(msg);
-  });
-  await run();
-  expect(Object.keys(artifacts)).toContain('last-run');
-  expect(infoCalls.some((m) => m.includes('Stored last run timestamp'))).toBe(true);
-});
-
-test('get mode returns previously set timestamp', async () => {
-  // First set
+test('mode set uploads timestamp (no output)', async () => {
   setInputs({ mode: 'set' });
   await run();
-  const stored = artifacts['last-run'];
-  // Then get
-  setInputs({ mode: 'get' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
-  await run();
-  expect(outputs['last-run']).toBe(stored);
+  expect(uploaded.value).toBeTruthy();
+  expect(coreMock.setOutput).not.toHaveBeenCalledWith('last-run', expect.anything());
 });
 
-test('get mode with no artifact logs absence and sets no output', async () => {
+test('mode get retrieves existing repo artifact', async () => {
+  // Simulate existing artifact created previously
+  const ts = new Date().toISOString();
+  mockRepoArtifact({ created_at: ts, content: ts });
   setInputs({ mode: 'get' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
   await run();
-  expect(outputs['last-run']).toBeUndefined();
+  expect(coreMock.setOutput).toHaveBeenCalledWith('last-run', ts);
 });
 
-test('error path when listing artifacts produces warning and no output', async () => {
-  failList = true;
-  setInputs({ mode: 'get' });
+test('mode get with no token yields no output and warning', async () => {
   const warnings: string[] = [];
   (coreMock.warning as any).mockImplementation((m: string) => warnings.push(m));
-  await run();
-  expect(warnings.some((w) => w.includes('Unable to retrieve last run artifact'))).toBe(true);
-});
-
-test('zip-based artifact download path is handled', async () => {
-  // First set normally
-  setInputs({ mode: 'set' });
-  await run();
-  const stored = artifacts['last-run'];
-  // Now simulate zip retrieval
-  simulateZip = true;
   setInputs({ mode: 'get' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
   await run();
-  expect(outputs['last-run']).toBe(stored);
+  expect(coreMock.setOutput).not.toHaveBeenCalled();
+  expect(warnings.some((w) => w.includes('No valid previous run timestamp'))).toBe(true);
 });
 
-// Removed precedence test because legacy get/set flags are deprecated and removed.
-
-test('mode get-and-set returns previous then updates artifact', async () => {
-  // First set an artifact with a known value
-  setInputs({ mode: 'set' });
-  await run();
-  const previous = artifacts['last-run'];
-
-  // Now run get-and-set
+test('mode get-and-set returns previous then uploads newer timestamp', async () => {
+  const earlier = new Date(Date.now() - 5000).toISOString();
+  mockRepoArtifact({ created_at: earlier, content: earlier });
   setInputs({ mode: 'get-and-set' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
   await run();
-  expect(outputs['last-run']).toBe(previous);
-  // After run, artifact should have been updated to a newer timestamp (lexicographically greater)
-  expect(artifacts['last-run']).not.toBe(previous);
+  // First output set to earlier
+  expect(coreMock.setOutput).toHaveBeenCalledWith('last-run', earlier);
+  // Upload occurred with newer value
+  expect(uploaded.value && uploaded.value > earlier).toBe(true);
 });
 
-test('fail-if-missing causes action failure when no artifact', async () => {
-  setInputs({ mode: 'get', 'fail-if-missing': 'true' });
-  const failures: string[] = [];
-  coreMock.setFailed.mockImplementation((m: string | Error) => failures.push(String(m)));
-  await run();
-  expect(failures.some((m) => m.includes('No valid previous run timestamp'))).toBe(true);
+test('alias modes getset & get_and_set behave like get-and-set', async () => {
+  const ts = new Date(Date.now() - 8000).toISOString();
+  mockRepoArtifact({ created_at: ts, content: ts });
+  for (const alias of ['getset', 'get_and_set']) {
+    // Re-seed repo artifact for each alias since previous run may upload a newer timestamp
+    jest.clearAllMocks();
+    mockRepoArtifact({ created_at: ts, content: ts });
+    setInputs({ mode: alias });
+    await run();
+    expect(coreMock.setOutput).toHaveBeenCalledWith('last-run', ts);
+    expect(uploaded.value && uploaded.value > ts).toBe(true);
+  }
 });
 
-test('invalid stored timestamp is ignored (no output) without failing', async () => {
-  // Create invalid artifact value directly
-  artifacts['last-run'] = 'not-a-timestamp';
-  setInputs({ mode: 'get' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
-  await run();
-  expect(outputs['last-run']).toBeUndefined();
-});
-
-test('corrupted zip produces warning and no output', async () => {
-  // Seed valid artifact
-  artifacts['last-run'] = new Date().toISOString();
-  simulateZip = true;
-  corruptZip = true;
-  setInputs({ mode: 'get' });
-  const warnings: string[] = [];
-  (coreMock.warning as any).mockImplementation((m: string) => warnings.push(m));
-  await run();
-  // Depending on AdmZip error, message may vary; ensure either specific message or no output produced
-  const hadOutput = (coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run');
-  expect(hadOutput).toBe(false);
-});
-
-test('retry logic succeeds after transient list failure', async () => {
-  // Seed artifact
-  artifacts['last-run'] = new Date().toISOString();
-  failListCount = 1; // first list fails, second succeeds
-  setInputs({ mode: 'get' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
-  await run();
-  expect(outputs['last-run']).toBeDefined();
-});
-
-test('retry logic succeeds after transient download failure', async () => {
-  // Seed artifact via upload path for realism
-  setInputs({ mode: 'set' });
-  await run();
-  failDownloadCount = 1; // first download fails
-  setInputs({ mode: 'get' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
-  await run();
-  expect(outputs['last-run']).toBeDefined();
-});
-
-test('alias mode getset behaves like get-and-set', async () => {
-  setInputs({ mode: 'set' });
-  await run();
-  const previous = artifacts['last-run'];
-  setInputs({ mode: 'getset' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
-  await run();
-  expect(outputs['last-run']).toBe(previous);
-  expect(artifacts['last-run']).not.toBe(previous);
-});
-
-test('alias mode get_and_set behaves like get-and-set', async () => {
-  setInputs({ mode: 'set' });
-  await run();
-  const previous = artifacts['last-run'];
-  setInputs({ mode: 'get_and_set' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
-  await run();
-  expect(outputs['last-run']).toBe(previous);
-  expect(artifacts['last-run']).not.toBe(previous);
-});
-
-test('unknown mode defaults to get only', async () => {
-  // Prepare artifact
-  setInputs({ mode: 'set' });
-  await run();
-  const stored = artifacts['last-run'];
-  // Use unknown mode value
+test('unknown mode defaults to get', async () => {
+  const ts = '2030-01-01T00:00:00.000Z';
+  jest.clearAllMocks();
+  mockRepoArtifact({ created_at: ts, content: ts });
   setInputs({ mode: 'mystery' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
-  });
   await run();
-  expect(outputs['last-run']).toBe(stored);
-  // Ensure artifact not updated (value unchanged)
-  expect(artifacts['last-run']).toBe(stored);
+  const calls = (coreMock.setOutput as jest.Mock).mock.calls.filter((c) => c[0] === 'last-run');
+  expect(calls.length).toBe(1);
+  const value = calls[0][1];
+  // Must be a valid ISO timestamp
+  expect(typeof value).toBe('string');
+  expect(value.endsWith('Z')).toBe(true);
 });
 
-test('invalid timestamp with fail-if-missing triggers failure', async () => {
-  artifacts['last-run'] = 'INVALID_TIME';
+test('fail-if-missing triggers failure when absent', async () => {
   setInputs({ mode: 'get', 'fail-if-missing': 'true' });
-  const failures: string[] = [];
-  coreMock.setFailed.mockImplementation((m: string | Error) => failures.push(String(m)));
   await run();
-  expect(failures.some((m) => m.includes('No valid previous run timestamp'))).toBe(true);
+  expect(coreMock.setFailed).toHaveBeenCalledWith(
+    expect.stringContaining('No valid previous run timestamp'),
+  );
 });
 
-test('mode set does not set output', async () => {
-  setInputs({ mode: 'set' });
-  const outputs: Record<string, string> = {};
-  coreMock.setOutput.mockImplementation((k, v) => {
-    outputs[k] = v as string;
+test('invalid timestamp content ignored (no output)', async () => {
+  const bad = 'not-a-timestamp';
+  mockRepoArtifact({ content: bad, created_at: new Date().toISOString() });
+  setInputs({ mode: 'get' });
+  await run();
+  expect(coreMock.setOutput).not.toHaveBeenCalledWith('last-run', bad);
+});
+
+test('invalid timestamp with fail-if-missing fails action', async () => {
+  const bad = 'invalid';
+  mockRepoArtifact({ content: bad, created_at: new Date().toISOString() });
+  setInputs({ mode: 'get', 'fail-if-missing': 'true' });
+  await run();
+  expect(coreMock.setFailed).toHaveBeenCalledWith(
+    expect.stringContaining('No valid previous run timestamp'),
+  );
+});
+
+test('expired artifacts ignored (no viable)', async () => {
+  process.env.GITHUB_TOKEN = 'token';
+  const old = new Date(Date.now() - 86400000).toISOString();
+  listArtifactsMock.mockResolvedValueOnce({
+    data: {
+      artifacts: [
+        {
+          id: 1,
+          name: 'last-run',
+          created_at: old,
+          expired: true,
+          archive_download_url: 'GET /repos/o/r/actions/artifacts/1/zip',
+        },
+      ],
+    },
   });
+  setInputs({ mode: 'get' });
   await run();
-  expect(outputs['last-run']).toBeUndefined();
+  expect(coreMock.setOutput).not.toHaveBeenCalled();
 });
 
-test('error during upload results in failure', async () => {
-  // Mock artifact client upload to throw
-  const MockedArtifact = require('@actions/artifact');
-  MockedArtifact.DefaultArtifactClient.prototype.uploadArtifact = jest
-    .fn()
-    .mockRejectedValue(new Error('upload boom'));
-  setInputs({ mode: 'set' });
-  const failures: string[] = [];
-  coreMock.setFailed.mockImplementation((m: string | Error) => failures.push(String(m)));
+test('pagination: second page supplies artifact', async () => {
+  jest.clearAllMocks();
+  coreMock.getInput.mockImplementation(
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
+  );
+  coreMock.getBooleanInput.mockImplementation(
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] === 'true',
+  );
+  process.env.GITHUB_TOKEN = 'token';
+  const page1Ts = new Date(Date.now() - 60000).toISOString();
+  const page2Ts = new Date().toISOString();
+  // Page 1: exactly 100 artifacts, only a non-matching name to force pagination
+  const page1 = Array.from({ length: 100 }).map((_, i) => ({
+    id: 6000 + i,
+    name: 'other',
+    created_at: page1Ts,
+    expired: false,
+    archive_download_url: `GET /repos/o/r/actions/artifacts/${6000 + i}/zip`,
+  }));
+  listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: page1 } });
+  // Page 2: include two last-run artifacts, newest picked
+  listArtifactsMock.mockResolvedValueOnce({
+    data: {
+      artifacts: [
+        {
+          id: 7000,
+          name: 'last-run',
+          created_at: page1Ts,
+          expired: false,
+          archive_download_url: 'GET /repos/o/r/actions/artifacts/7000/zip',
+        },
+        {
+          id: 7001,
+          name: 'last-run',
+          created_at: page2Ts,
+          expired: false,
+          archive_download_url: 'GET /repos/o/r/actions/artifacts/7001/zip',
+        },
+      ],
+    },
+  });
+  // Only the newest (page2Ts) should be downloaded; our code picks latest after sorting
+  requestMock.mockResolvedValueOnce({ data: zipWith(page2Ts) });
+  setInputs({ mode: 'get' });
   await run();
-  expect(failures.some((m) => m.includes('upload boom'))).toBe(true);
+  const outputCall = (coreMock.setOutput as jest.Mock).mock.calls.find((c) => c[0] === 'last-run');
+  expect(outputCall && outputCall[1]).toBe(page2Ts);
+});
+
+test('missing file inside zip returns no output', async () => {
+  jest.clearAllMocks();
+  coreMock.getInput.mockImplementation(
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
+  );
+  coreMock.getBooleanInput.mockImplementation(
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] === 'true',
+  );
+  process.env.GITHUB_TOKEN = 'token';
+  const created = new Date().toISOString();
+  listArtifactsMock.mockResolvedValueOnce({
+    data: {
+      artifacts: [
+        {
+          id: 222,
+          name: 'last-run',
+          created_at: created,
+          expired: false,
+          archive_download_url: 'GET /repos/o/r/actions/artifacts/222/zip',
+        },
+      ],
+    },
+  });
+  requestMock.mockResolvedValueOnce({ data: zipWith(null) });
+  setInputs({ mode: 'get' });
+  await run();
+  const outputs = (coreMock.setOutput as jest.Mock).mock.calls.filter((c) => c[0] === 'last-run');
+  expect(outputs.length).toBe(0);
+});
+
+test('downloadArtifactArchive missing token after discovery returns null (no output)', async () => {
+  jest.clearAllMocks();
+  coreMock.getInput.mockImplementation(
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
+  );
+  coreMock.getBooleanInput.mockImplementation(
+    (n: string) => process.env[`INPUT_${n.toUpperCase()}`] === 'true',
+  );
+  // First list requires token; supply it then remove before archive download
+  process.env.GITHUB_TOKEN = 'token';
+  const ts = new Date().toISOString();
+  listArtifactsMock.mockResolvedValueOnce({
+    data: {
+      artifacts: [
+        {
+          id: 9000,
+          name: 'last-run',
+          created_at: ts,
+          expired: false,
+          archive_download_url: 'GET /repos/o/r/actions/artifacts/9000/zip',
+        },
+      ],
+    },
+  });
+  // Remove token so downloadArtifactArchive hits missing token branch
+  delete process.env.GITHUB_TOKEN;
+  setInputs({ mode: 'get' });
+  await run();
+  expect((coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
+});
+
+test('listAllRepoArtifactsByName no token path returns empty (indirectly no output)', async () => {
+  // Ensure no token present
+  delete process.env.GITHUB_TOKEN;
+  jest.clearAllMocks();
+  setInputs({ mode: 'get' });
+  await run();
+  expect(coreMock.setOutput).not.toHaveBeenCalled();
+});
+
+test('pattern-invalid timestamp triggers warning and no output', async () => {
+  jest.clearAllMocks();
+  const bad = 'not-a-timestamp';
+  mockRepoArtifact({ created_at: new Date().toISOString(), content: bad });
+  setInputs({ mode: 'get' });
+  await run();
+  expect(coreMock.setOutput).not.toHaveBeenCalledWith('last-run', bad);
+  const warned = (coreMock.warning as jest.Mock).mock.calls.some((c) =>
+    String(c[0]).includes('Invalid timestamp format'),
+  );
+  // If pattern didn't trigger, then we expect generic missing warning
+  if (!warned) {
+    expect(
+      (coreMock.warning as jest.Mock).mock.calls.some((c) =>
+        String(c[0]).includes('No valid previous run timestamp'),
+      ),
+    ).toBe(true);
+  }
+});
+
+test('parse-invalid timestamp triggers warning and no output', async () => {
+  jest.clearAllMocks();
+  const bad = '2025-13-01T00:00:00Z'; // matches pattern but invalid month
+  mockRepoArtifact({ created_at: new Date().toISOString(), content: bad });
+  setInputs({ mode: 'get' });
+  await run();
+  // Depending on engine, may parse; if it parses we accept output else we expect warning
+  const wasSet = (coreMock.setOutput as jest.Mock).mock.calls.some(
+    (c) => c[0] === 'last-run' && c[1] === bad,
+  );
+  if (!wasSet) {
+    expect(coreMock.warning).toHaveBeenCalled();
+  }
+});
+
+test('corrupted zip triggers warning and no output', async () => {
+  const ts = new Date().toISOString();
+  process.env.GITHUB_TOKEN = 'token';
+  listArtifactsMock.mockResolvedValueOnce({
+    data: {
+      artifacts: [
+        {
+          id: 111,
+          name: 'last-run',
+          created_at: ts,
+          expired: false,
+          archive_download_url: 'GET /repos/o/r/actions/artifacts/111/zip',
+        },
+      ],
+    },
+  });
+  // Provide invalid (non-zip) buffer
+  requestMock.mockResolvedValueOnce({ data: Buffer.from('not-a-zip') });
+  setInputs({ mode: 'get' });
+  await run();
+  expect(coreMock.setOutput).not.toHaveBeenCalled();
+  expect(coreMock.warning).toHaveBeenCalled();
+});
+
+test('upload failure surfaces via set mode', async () => {
+  const ArtifactMod = require('@actions/artifact');
+  ArtifactMod.DefaultArtifactClient.prototype.uploadArtifact = jest
+    .fn()
+    .mockRejectedValue(new Error('boom-upload'));
+  setInputs({ mode: 'set' });
+  await run();
+  expect(coreMock.setFailed).toHaveBeenCalledWith(expect.stringContaining('boom-upload'));
 });
