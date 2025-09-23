@@ -5,6 +5,7 @@ import * as github from '@actions/github';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import AdmZip from 'adm-zip';
+import { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
 
 // Constants for artifact management
 const ARTIFACT_NAME = 'last-run';
@@ -227,17 +228,8 @@ async function downloadTimestampWithValidation(): Promise<string | null> {
   return value!;
 }
 
-/**
- * Summary information for a repository artifact returned by GitHub API.
- * Used to identify and filter artifacts when searching for the latest timestamp.
- */
-interface RepoArtifactSummary {
-  id: number;
-  name: string;
-  created_at: string;
-  expired: boolean;
-  archive_download_url: string;
-}
+type Artifact =
+  RestEndpointMethodTypes['actions']['listArtifactsForRepo']['response']['data']['artifacts'][number];
 
 /**
  * Retrieves artifacts from the repository that match the specified name.
@@ -245,7 +237,7 @@ interface RepoArtifactSummary {
  * @param name The artifact name to search for (e.g., 'last-run')
  * @returns Array of matching artifact summaries, empty if none found or no token available
  */
-async function listRepoArtifactsByName(name: string): Promise<RepoArtifactSummary[]> {
+async function listRepoArtifactsByName(name: string): Promise<Artifact[]> {
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
     core.debug('listRepoArtifactsByName: no token available, skipping repo-level lookup');
@@ -257,19 +249,9 @@ async function listRepoArtifactsByName(name: string): Promise<RepoArtifactSummar
 
   core.debug('listRepoArtifactsByName: fetching first page');
   const resp = await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, name });
-  const artifacts = resp.data.artifacts as any[];
-
-  // Convert to our RepoArtifactSummary format
-  const matches: RepoArtifactSummary[] = artifacts.map((a) => ({
-    id: a.id,
-    name: a.name,
-    created_at: a.created_at,
-    expired: !!a.expired,
-    archive_download_url: a.archive_download_url,
-  }));
-
-  core.debug(`listRepoArtifactsByName: found ${matches.length} artifacts`);
-  return matches;
+  const artifacts = resp.data.artifacts;
+  core.debug(`listRepoArtifactsByName: found ${artifacts.length} artifacts`);
+  return artifacts;
 }
 
 /**
@@ -291,21 +273,11 @@ export async function downloadTimestamp(): Promise<string | null> {
 }
 
 /**
- * Metadata for the latest artifact found in the repository.
- * Contains essential information needed to download and process the artifact.
- */
-interface LatestArtifactMeta {
-  id: number;
-  created_at: string;
-  archive_download_url: string;
-}
-
-/**
  * Finds the latest non-expired artifact with the specified name from the repository.
  * Sorts artifacts by creation date and returns the most recent one.
  * @returns Metadata for the latest artifact or null if none found
  */
-async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
+async function fetchLatestRepoArtifact(): Promise<Artifact | null> {
   const artifacts = await listRepoArtifactsByName(ARTIFACT_NAME);
   if (!artifacts.length) {
     core.debug('fetchLatestRepoArtifact: no repo-level artifacts found');
@@ -313,16 +285,14 @@ async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
   }
 
   // Filter out expired artifacts
-  const viable = artifacts.filter((a: RepoArtifactSummary) => !a.expired);
+  const viable = artifacts.filter((a) => !a.expired);
   if (!viable.length) {
     core.debug('fetchLatestRepoArtifact: only expired artifacts found');
     return null;
   }
 
   // Sort by creation date and select the most recent
-  viable.sort((a: RepoArtifactSummary, b: RepoArtifactSummary) =>
-    a.created_at.localeCompare(b.created_at),
-  );
+  viable.sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''));
   const latest = viable[viable.length - 1];
   core.debug(`fetchLatestRepoArtifact: chosen id=${latest.id} created_at=${latest.created_at}`);
   return latest;
@@ -334,23 +304,29 @@ async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
  * @param latest Metadata for the artifact to download
  * @returns Path to the downloaded ZIP file or null if download fails
  */
-async function downloadArtifactArchive(latest: LatestArtifactMeta): Promise<string | null> {
+async function downloadArtifactArchive(latest: Artifact): Promise<string | null | undefined> {
+  const artifact = new DefaultArtifactClient();
   const token = process.env.GITHUB_TOKEN;
+
   if (!token) {
     core.debug('downloadArtifactArchive: missing token');
     return null;
   }
-  const octokit = github.getOctokit(token);
-  const resp = await octokit.request(latest.archive_download_url, {
-    headers: { Accept: 'application/zip' },
-  });
-  const tempDir = process.env['RUNNER_TEMP'] || process.cwd();
-  const zipPath = path.join(tempDir, `repo-artifact-${latest.id}.zip`);
 
-  // Write the ZIP file content to disk
-  await fs.writeFile(zipPath, Buffer.from(resp.data as ArrayBuffer));
-  core.debug(`downloadArtifactArchive: wrote ${zipPath}`);
-  return zipPath;
+  const { owner, repo } = github.context.repo;
+  const findBy = {
+    token: process.env['GITHUB_TOKEN'] || '',
+    workflowRunId: latest.workflow_run?.id || 0,
+    repositoryOwner: owner,
+    repositoryName: repo,
+  };
+
+  const { downloadPath } = await artifact.downloadArtifact(latest.id, {
+    findBy,
+  });
+
+  core.debug(`downloadArtifactArchive: wrote ${downloadPath}`);
+  return downloadPath;
 }
 
 /**
