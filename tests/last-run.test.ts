@@ -24,14 +24,29 @@ jest.mock('@actions/artifact', () => {
 
 // Mocks for repo-level listing & download
 const listArtifactsMock = jest.fn();
-const requestMock = jest.fn();
 jest.mock('@actions/github', () => ({
   getOctokit: () => ({
     rest: { actions: { listArtifactsForRepo: listArtifactsMock } },
-    request: requestMock,
   }),
   context: { repo: { owner: 'o', repo: 'r' } },
 }));
+
+// Mock the artifact download path via DefaultArtifactClient.downloadArtifact to return our zip buffer
+const downloadArtifactMock = jest.fn();
+jest.mock('@actions/artifact', () => {
+  class MockArtifactClient {
+    async uploadArtifact(name: string, files: string[], _root?: string) {
+      const fs = require('fs');
+      const filePath = files[0];
+      uploaded.value = fs.readFileSync(filePath, 'utf8');
+      return { id: 999, size: (uploaded.value || '').length, name };
+    }
+    async downloadArtifact(id: number): Promise<{ downloadPath: string }> {
+      return downloadArtifactMock(id);
+    }
+  }
+  return { DefaultArtifactClient: MockArtifactClient };
+});
 
 const coreMock = core as jest.Mocked<typeof core>;
 
@@ -80,7 +95,14 @@ function mockRepoArtifact(options: {
   listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: artifactsPage } });
   if (content !== undefined) {
     const data = content === null ? zipWith(null) : zipWith(content);
-    requestMock.mockResolvedValueOnce({ data });
+    // Configure downloadArtifactMock for this artifact id
+    downloadArtifactMock.mockImplementationOnce(async (artifactId: number) => {
+      const fs = require('fs');
+      const path = require('path');
+      const tmp = path.join(process.cwd(), `artifact-${artifactId}.zip`);
+      fs.writeFileSync(tmp, data);
+      return { downloadPath: tmp };
+    });
   }
   return { id, created_at, content };
 }
@@ -94,7 +116,7 @@ beforeEach(() => {
   // Completely reset the mocks to ensure no queued responses remain
   listArtifactsMock.mockReset();
   listArtifactsMock.mockResolvedValue({ data: { artifacts: [] } });
-  requestMock.mockReset();
+  downloadArtifactMock.mockReset();
   coreMock.getInput.mockImplementation(
     (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
   );
@@ -237,7 +259,13 @@ test('missing file inside zip returns no output', async () => {
       ],
     },
   });
-  requestMock.mockResolvedValueOnce({ data: zipWith(null) });
+  downloadArtifactMock.mockImplementationOnce(async (artifactId: number) => {
+    const fs = require('fs');
+    const path = require('path');
+    const tmp = path.join(process.cwd(), `artifact-${artifactId}.zip`);
+    fs.writeFileSync(tmp, zipWith(null));
+    return { downloadPath: tmp };
+  });
   setInputs({ mode: 'get' });
   await run();
   const outputs = (coreMock.setOutput as jest.Mock).mock.calls.filter((c) => c[0] === 'last-run');
@@ -336,7 +364,13 @@ test('corrupted zip triggers warning and no output', async () => {
     },
   });
   // Provide invalid (non-zip) buffer
-  requestMock.mockResolvedValueOnce({ data: Buffer.from('not-a-zip') });
+  downloadArtifactMock.mockImplementationOnce(async (artifactId: number) => {
+    const fs = require('fs');
+    const path = require('path');
+    const tmp = path.join(process.cwd(), `artifact-${artifactId}.zip`);
+    fs.writeFileSync(tmp, Buffer.from('not-a-zip'));
+    return { downloadPath: tmp };
+  });
   setInputs({ mode: 'get' });
   await run();
   expect(coreMock.setOutput).not.toHaveBeenCalled();

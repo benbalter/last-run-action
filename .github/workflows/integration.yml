@@ -20,7 +20,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           mode: get
-          fail-if-missing: 'false'
+          fail-if-missing: 'true'
 
       - name: Echo last run
         run: |

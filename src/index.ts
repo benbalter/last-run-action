@@ -4,7 +4,6 @@ import { DefaultArtifactClient } from '@actions/artifact';
 import * as github from '@actions/github';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import AdmZip from 'adm-zip';
 import { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
 
 // Constants for artifact management
@@ -263,9 +262,15 @@ export async function downloadTimestamp(): Promise<string | null> {
   try {
     const latest = await fetchLatestRepoArtifact();
     if (!latest) return null;
-    const zipPath = await downloadArtifactArchive(latest);
-    if (!zipPath) return null;
-    return await extractTimestampFromZip(zipPath);
+    const dir = await downloadArtifactArchive(latest);
+    if (!dir) return null;
+    const path = `${dir}/${FILENAME}`;
+    if (!(await fs.stat(path))) {
+      core.warning(`Timestamp file not found: ${path}`);
+      return null;
+    }
+    const timestamp = await fs.readFile(path, 'utf8');
+    return timestamp;
   } catch (err: any) {
     core.warning(`Repo-level artifact lookup failed: ${err.message || err}`);
     return null;
@@ -325,34 +330,9 @@ async function downloadArtifactArchive(latest: Artifact): Promise<string | null 
     findBy,
   });
 
-  core.debug(`downloadArtifactArchive: wrote ${downloadPath}`);
+  core.debug(`downloadArtifactArchive: wrote to ${downloadPath}`);
   return downloadPath;
 }
-
-/**
- * Extracts the timestamp content from a downloaded artifact ZIP file.
- * Looks for the expected filename and returns its content as a string.
- * @param zipPath Path to the ZIP file containing the timestamp artifact
- * @returns The extracted timestamp string or null if extraction fails
- */
-async function extractTimestampFromZip(zipPath: string): Promise<string | null> {
-  try {
-    const zip = new AdmZip(zipPath);
-    const entry = zip.getEntry(FILENAME);
-    if (!entry) {
-      core.debug('extractTimestampFromZip: entry not found');
-      return null;
-    }
-    const content = zip.readAsText(entry).trim();
-    core.debug('extractTimestampFromZip: extracted timestamp');
-    return content;
-  } catch (err: any) {
-    core.warning(`Failed to extract zip: ${err.message || err}`);
-    return null;
-  }
-}
-
-// Removed custom retryAsync in favor of async-retry for clearer semantics and backoff handling.
 
 // Auto-execute only when run directly by Node (GitHub Actions runtime)
 if (require.main === module) {
@@ -366,6 +346,5 @@ export const __test__ = {
   listRepoArtifactsByName,
   fetchLatestRepoArtifact,
   downloadArtifactArchive,
-  extractTimestampFromZip,
   validateIsoTimestamp,
 };

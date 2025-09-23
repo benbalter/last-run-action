@@ -4,6 +4,20 @@ import * as github from '@actions/github';
 import { promises as fs } from 'fs';
 import path from 'path';
 
+// Mock artifact client prior to import usage (hoisted)
+jest.mock('@actions/artifact', () => {
+  class MockArtifactClient {
+    // For these internal helper tests we only need downloadArtifact when token provided
+    async downloadArtifact(id: number): Promise<{ downloadPath: string }> {
+      // create a trivial zip with or without file handled in specific tests (they call extract directly)
+      const tmp = path.join(process.cwd(), `internal-${id}.zip`);
+      await fs.writeFile(tmp, Buffer.from('PK\x05\x06' + '\x00'.repeat(18), 'binary')); // minimal empty zip
+      return { downloadPath: tmp };
+    }
+  }
+  return { DefaultArtifactClient: MockArtifactClient };
+});
+
 jest.mock('@actions/core');
 
 // Minimal mocks for github
@@ -94,20 +108,33 @@ describe('internal helpers', () => {
   test('downloadArtifactArchive returns null missing token', async () => {
     const v = await __test__.downloadArtifactArchive({
       id: 1,
-      created_at: 'x',
+      node_id: 'node',
+      name: 'last-run',
+      size_in_bytes: 0,
+      url: 'url',
       archive_download_url: 'GET /repos/o/r/actions/artifacts/1/zip',
-    });
+      expired: false,
+      created_at: '2025-01-01T00:00:00Z',
+      expires_at: '2030-01-01T00:00:00Z',
+      updated_at: '2025-01-01T00:00:00Z',
+    } as any);
     expect(v).toBeNull();
   });
 
-  test('downloadArtifactArchive writes zip', async () => {
+  test('downloadArtifactArchive writes zip (uses mocked artifact client)', async () => {
     process.env.GITHUB_TOKEN = 't';
-    request.mockResolvedValueOnce({ data: makeZip({ 'last-run.txt': 'value' }) });
     const meta = {
       id: 9,
-      created_at: '2025-01-01T00:00:00Z',
+      node_id: 'n9',
+      name: 'last-run',
+      size_in_bytes: 10,
+      url: 'url',
       archive_download_url: 'GET /repos/o/r/actions/artifacts/9/zip',
-    };
+      expired: false,
+      created_at: '2025-01-01T00:00:00Z',
+      expires_at: '2030-01-01T00:00:00Z',
+      updated_at: '2025-01-01T00:00:00Z',
+    } as any;
     const p = await __test__.downloadArtifactArchive(meta);
     expect(typeof p).toBe('string');
     if (p) {
