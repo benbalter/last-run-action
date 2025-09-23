@@ -12,7 +12,24 @@ const FILENAME = 'last-run.txt';
 
 /**
  * Main entry point for the GitHub Action.
- * Handles both retrieving and storing last run timestamps based on the configured mode.
+ *
+ * Supported modes (input: `mode`):
+ *   - `get`          : Retrieve previously stored timestamp (if any) and expose it as `last-run` output.
+ *   - `set`          : Store current timestamp (no output produced).
+ *   - `get-and-set`  : Retrieve previous timestamp (output) then store a strictly newer timestamp.
+ *   - Aliases `getset`, `get_and_set` behave like `get-and-set`.
+ *   - Any unknown value quietly defaults to `get`.
+ *
+ * Failure semantics:
+ *   When `fail-if-missing: true` and a valid prior timestamp cannot be retrieved, the action is
+ *   marked as failed (core.setFailed). If the selected mode also performs `set` (e.g. `get-and-set`),
+ *   the new timestamp upload STILL proceeds. This design ensures subsequent runs have a baseline
+ *   timestamp even if the first retrieval attempt failed.
+ *
+ * Monotonicity:
+ *   In combined `get-and-set` modes a loop waits (at microsecond resolution governed by Date.now())
+ *   until the newly generated ISO timestamp string is strictly greater than the previous to avoid
+ *   duplicate values in extremely fast consecutive invocations.
  */
 export async function run(): Promise<void> {
   try {
@@ -51,6 +68,8 @@ interface CollectedInputs {
 
 /**
  * Collects and validates inputs from the GitHub Action configuration.
+ * Performs normalization (lower-casing, defaulting) and derives which operations (get/set)
+ * will execute. Unknown modes degrade gracefully to `get` to avoid unexpected failures.
  * @returns Parsed and normalized input values
  */
 function collectInputs(): CollectedInputs {
@@ -68,10 +87,17 @@ function collectInputs(): CollectedInputs {
 }
 
 /**
- * Retrieves the previous run timestamp, emitting it as an output or
- * failing the action if required and not found.
- * @param failIfMissing Whether to fail the action if no timestamp is found
- * @returns The retrieved timestamp or null if not found
+ * Retrieves the previous run timestamp (repository-level artifact lookup) and, if valid,
+ * sets it as the `last-run` output. Validation enforces ISO 8601 pattern and parseability.
+ *
+ * When missing or invalid:
+ *   - With `failIfMissing=false`: a warning is emitted, no output is set, action continues.
+ *   - With `failIfMissing=true` : the action is marked failed (but execution of later steps
+ *     in this function continues so a subsequent `set` operation in combined mode can still
+ *     seed an initial timestamp for future runs).
+ *
+ * @param failIfMissing Whether to fail the action if no valid timestamp is found
+ * @returns The retrieved timestamp or null if not found/invalid
  */
 async function getLastRun(failIfMissing: boolean): Promise<string | null> {
   core.debug(`getLastRun: failIfMissing=${failIfMissing}`);
@@ -100,9 +126,14 @@ async function getLastRun(failIfMissing: boolean): Promise<string | null> {
 }
 
 /**
- * Stores the current timestamp as an artifact.
- * Ensures monotonic timestamp progression to avoid timing conflicts.
- * @param previous The previously retrieved timestamp for monotonic comparison
+ * Stores the current UTC timestamp (`Date().toISOString()`) as an artifact named `last-run`.
+ * If a previous timestamp was retrieved earlier in the run, guarantees the newly stored value
+ * is lexicographically (and chronologically) greater by regenerating until strictly larger.
+ *
+ * Output note: By design, `set`-only flows do not emit an output; workflows that need the
+ * previous value should use `get` first or the combined `get-and-set` mode.
+ *
+ * @param previous Previously retrieved timestamp (or null) used to enforce monotonicity
  */
 async function setLastRun(previous: string | null): Promise<void> {
   core.debug(`setLastRun: previous='${previous}'`);
@@ -137,8 +168,10 @@ interface Operations {
 }
 
 /**
- * Determines which operations to perform based on the specified mode.
- * @param mode The operation mode ('get', 'set', 'get-and-set', etc.)
+ * Determines which operations to perform based on the specified mode string.
+ * Recognizes canonical forms plus accepted aliases. Unknown values default to a safe
+ * read-only retrieval (`get`). This conservative default avoids accidental writes.
+ * @param mode The operation mode ('get', 'set', 'get-and-set', alias, or unknown)
  * @returns Operations configuration indicating which actions to take
  */
 function deriveOperations(mode: string): Operations {
@@ -175,7 +208,9 @@ export async function uploadTimestamp(value: string): Promise<void> {
   core.debug(`uploadTimestamp: uploaded artifact '${ARTIFACT_NAME}'`);
 }
 
-// Removed per-run artifact retrieval logic; repository-level lookup is now primary.
+// NOTE: Prior implementations attempted a per-run artifact short-circuit. That logic was
+// removed: repository-level lookup alone provides simpler, deterministic behavior and the
+// necessary cross-run persistence without extra branches.
 
 /**
  * Regular expression to validate ISO 8601 timestamp format.
@@ -202,8 +237,9 @@ export function validateIsoTimestamp(value: string | null | undefined): {
 }
 
 /**
- * Downloads and validates a timestamp from the latest repository artifact.
- * Combines artifact download with format validation to ensure data integrity.
+ * Downloads and validates a timestamp from the latest repository artifact (if any).
+ * Combines artifact download with format validation to ensure data integrity. Invalid or
+ * unparsable values produce warnings and are treated as missing rather than failing outright.
  * @returns A valid ISO timestamp string or null if download/validation fails
  */
 async function downloadTimestampWithValidation(): Promise<string | null> {
