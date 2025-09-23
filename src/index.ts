@@ -4,7 +4,7 @@ import { DefaultArtifactClient } from '@actions/artifact';
 import * as github from '@actions/github';
 import { promises as fs } from 'fs';
 import * as path from 'path';
-import AdmZip from 'adm-zip';
+import { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
 
 // Constants for artifact management
 const ARTIFACT_NAME = 'last-run';
@@ -12,7 +12,24 @@ const FILENAME = 'last-run.txt';
 
 /**
  * Main entry point for the GitHub Action.
- * Handles both retrieving and storing last run timestamps based on the configured mode.
+ *
+ * Supported modes (input: `mode`):
+ *   - `get`          : Retrieve previously stored timestamp (if any) and expose it as `last-run` output.
+ *   - `set`          : Store current timestamp (no output produced).
+ *   - `get-and-set`  : Retrieve previous timestamp (output) then store a strictly newer timestamp.
+ *   - Aliases `getset`, `get_and_set` behave like `get-and-set`.
+ *   - Any unknown value quietly defaults to `get`.
+ *
+ * Failure semantics:
+ *   When `fail-if-missing: true` and a valid prior timestamp cannot be retrieved, the action is
+ *   marked as failed (core.setFailed). If the selected mode also performs `set` (e.g. `get-and-set`),
+ *   the new timestamp upload STILL proceeds. This design ensures subsequent runs have a baseline
+ *   timestamp even if the first retrieval attempt failed.
+ *
+ * Monotonicity:
+ *   In combined `get-and-set` modes a loop waits (at microsecond resolution governed by Date.now())
+ *   until the newly generated ISO timestamp string is strictly greater than the previous to avoid
+ *   duplicate values in extremely fast consecutive invocations.
  */
 export async function run(): Promise<void> {
   try {
@@ -51,6 +68,8 @@ interface CollectedInputs {
 
 /**
  * Collects and validates inputs from the GitHub Action configuration.
+ * Performs normalization (lower-casing, defaulting) and derives which operations (get/set)
+ * will execute. Unknown modes degrade gracefully to `get` to avoid unexpected failures.
  * @returns Parsed and normalized input values
  */
 function collectInputs(): CollectedInputs {
@@ -68,10 +87,17 @@ function collectInputs(): CollectedInputs {
 }
 
 /**
- * Retrieves the previous run timestamp, emitting it as an output or
- * failing the action if required and not found.
- * @param failIfMissing Whether to fail the action if no timestamp is found
- * @returns The retrieved timestamp or null if not found
+ * Retrieves the previous run timestamp (repository-level artifact lookup) and, if valid,
+ * sets it as the `last-run` output. Validation enforces ISO 8601 pattern and parseability.
+ *
+ * When missing or invalid:
+ *   - With `failIfMissing=false`: a warning is emitted, no output is set, action continues.
+ *   - With `failIfMissing=true` : the action is marked failed (but execution of later steps
+ *     in this function continues so a subsequent `set` operation in combined mode can still
+ *     seed an initial timestamp for future runs).
+ *
+ * @param failIfMissing Whether to fail the action if no valid timestamp is found
+ * @returns The retrieved timestamp or null if not found/invalid
  */
 async function getLastRun(failIfMissing: boolean): Promise<string | null> {
   core.debug(`getLastRun: failIfMissing=${failIfMissing}`);
@@ -100,9 +126,14 @@ async function getLastRun(failIfMissing: boolean): Promise<string | null> {
 }
 
 /**
- * Stores the current timestamp as an artifact.
- * Ensures monotonic timestamp progression to avoid timing conflicts.
- * @param previous The previously retrieved timestamp for monotonic comparison
+ * Stores the current UTC timestamp (`Date().toISOString()`) as an artifact named `last-run`.
+ * If a previous timestamp was retrieved earlier in the run, guarantees the newly stored value
+ * is lexicographically (and chronologically) greater by regenerating until strictly larger.
+ *
+ * Output note: By design, `set`-only flows do not emit an output; workflows that need the
+ * previous value should use `get` first or the combined `get-and-set` mode.
+ *
+ * @param previous Previously retrieved timestamp (or null) used to enforce monotonicity
  */
 async function setLastRun(previous: string | null): Promise<void> {
   core.debug(`setLastRun: previous='${previous}'`);
@@ -137,8 +168,10 @@ interface Operations {
 }
 
 /**
- * Determines which operations to perform based on the specified mode.
- * @param mode The operation mode ('get', 'set', 'get-and-set', etc.)
+ * Determines which operations to perform based on the specified mode string.
+ * Recognizes canonical forms plus accepted aliases. Unknown values default to a safe
+ * read-only retrieval (`get`). This conservative default avoids accidental writes.
+ * @param mode The operation mode ('get', 'set', 'get-and-set', alias, or unknown)
  * @returns Operations configuration indicating which actions to take
  */
 function deriveOperations(mode: string): Operations {
@@ -175,7 +208,9 @@ export async function uploadTimestamp(value: string): Promise<void> {
   core.debug(`uploadTimestamp: uploaded artifact '${ARTIFACT_NAME}'`);
 }
 
-// Removed per-run artifact retrieval logic; repository-level lookup is now primary.
+// NOTE: Prior implementations attempted a per-run artifact short-circuit. That logic was
+// removed: repository-level lookup alone provides simpler, deterministic behavior and the
+// necessary cross-run persistence without extra branches.
 
 /**
  * Regular expression to validate ISO 8601 timestamp format.
@@ -202,8 +237,9 @@ export function validateIsoTimestamp(value: string | null | undefined): {
 }
 
 /**
- * Downloads and validates a timestamp from the latest repository artifact.
- * Combines artifact download with format validation to ensure data integrity.
+ * Downloads and validates a timestamp from the latest repository artifact (if any).
+ * Combines artifact download with format validation to ensure data integrity. Invalid or
+ * unparsable values produce warnings and are treated as missing rather than failing outright.
  * @returns A valid ISO timestamp string or null if download/validation fails
  */
 async function downloadTimestampWithValidation(): Promise<string | null> {
@@ -227,17 +263,8 @@ async function downloadTimestampWithValidation(): Promise<string | null> {
   return value!;
 }
 
-/**
- * Summary information for a repository artifact returned by GitHub API.
- * Used to identify and filter artifacts when searching for the latest timestamp.
- */
-interface RepoArtifactSummary {
-  id: number;
-  name: string;
-  created_at: string;
-  expired: boolean;
-  archive_download_url: string;
-}
+type Artifact =
+  RestEndpointMethodTypes['actions']['listArtifactsForRepo']['response']['data']['artifacts'][number];
 
 /**
  * Retrieves artifacts from the repository that match the specified name.
@@ -245,7 +272,7 @@ interface RepoArtifactSummary {
  * @param name The artifact name to search for (e.g., 'last-run')
  * @returns Array of matching artifact summaries, empty if none found or no token available
  */
-async function listRepoArtifactsByName(name: string): Promise<RepoArtifactSummary[]> {
+async function listRepoArtifactsByName(name: string): Promise<Artifact[]> {
   const token = process.env.GITHUB_TOKEN;
   if (!token) {
     core.debug('listRepoArtifactsByName: no token available, skipping repo-level lookup');
@@ -257,19 +284,9 @@ async function listRepoArtifactsByName(name: string): Promise<RepoArtifactSummar
 
   core.debug('listRepoArtifactsByName: fetching first page');
   const resp = await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, name });
-  const artifacts = resp.data.artifacts as any[];
-
-  // Convert to our RepoArtifactSummary format
-  const matches: RepoArtifactSummary[] = artifacts.map((a) => ({
-    id: a.id,
-    name: a.name,
-    created_at: a.created_at,
-    expired: !!a.expired,
-    archive_download_url: a.archive_download_url,
-  }));
-
-  core.debug(`listRepoArtifactsByName: found ${matches.length} artifacts`);
-  return matches;
+  const artifacts = resp.data.artifacts;
+  core.debug(`listRepoArtifactsByName: found ${artifacts.length} artifacts`);
+  return artifacts;
 }
 
 /**
@@ -281,9 +298,15 @@ export async function downloadTimestamp(): Promise<string | null> {
   try {
     const latest = await fetchLatestRepoArtifact();
     if (!latest) return null;
-    const zipPath = await downloadArtifactArchive(latest);
-    if (!zipPath) return null;
-    return await extractTimestampFromZip(zipPath);
+    const dir = await downloadArtifactArchive(latest);
+    if (!dir) return null;
+    const path = `${dir}/${FILENAME}`;
+    if (!(await fs.stat(path))) {
+      core.warning(`Timestamp file not found: ${path}`);
+      return null;
+    }
+    const timestamp = await fs.readFile(path, 'utf8');
+    return timestamp;
   } catch (err: any) {
     core.warning(`Repo-level artifact lookup failed: ${err.message || err}`);
     return null;
@@ -291,21 +314,11 @@ export async function downloadTimestamp(): Promise<string | null> {
 }
 
 /**
- * Metadata for the latest artifact found in the repository.
- * Contains essential information needed to download and process the artifact.
- */
-interface LatestArtifactMeta {
-  id: number;
-  created_at: string;
-  archive_download_url: string;
-}
-
-/**
  * Finds the latest non-expired artifact with the specified name from the repository.
  * Sorts artifacts by creation date and returns the most recent one.
  * @returns Metadata for the latest artifact or null if none found
  */
-async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
+async function fetchLatestRepoArtifact(): Promise<Artifact | null> {
   const artifacts = await listRepoArtifactsByName(ARTIFACT_NAME);
   if (!artifacts.length) {
     core.debug('fetchLatestRepoArtifact: no repo-level artifacts found');
@@ -313,16 +326,14 @@ async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
   }
 
   // Filter out expired artifacts
-  const viable = artifacts.filter((a: RepoArtifactSummary) => !a.expired);
+  const viable = artifacts.filter((a) => !a.expired);
   if (!viable.length) {
     core.debug('fetchLatestRepoArtifact: only expired artifacts found');
     return null;
   }
 
   // Sort by creation date and select the most recent
-  viable.sort((a: RepoArtifactSummary, b: RepoArtifactSummary) =>
-    a.created_at.localeCompare(b.created_at),
-  );
+  viable.sort((a, b) => (a.created_at ?? '').localeCompare(b.created_at ?? ''));
   const latest = viable[viable.length - 1];
   core.debug(`fetchLatestRepoArtifact: chosen id=${latest.id} created_at=${latest.created_at}`);
   return latest;
@@ -334,49 +345,30 @@ async function fetchLatestRepoArtifact(): Promise<LatestArtifactMeta | null> {
  * @param latest Metadata for the artifact to download
  * @returns Path to the downloaded ZIP file or null if download fails
  */
-async function downloadArtifactArchive(latest: LatestArtifactMeta): Promise<string | null> {
+async function downloadArtifactArchive(latest: Artifact): Promise<string | null | undefined> {
+  const artifact = new DefaultArtifactClient();
   const token = process.env.GITHUB_TOKEN;
+
   if (!token) {
     core.debug('downloadArtifactArchive: missing token');
     return null;
   }
-  const octokit = github.getOctokit(token);
-  const resp = await octokit.request(latest.archive_download_url, {
-    headers: { Accept: 'application/zip' },
+
+  const { owner, repo } = github.context.repo;
+  const findBy = {
+    token: process.env['GITHUB_TOKEN'] || '',
+    workflowRunId: latest.workflow_run?.id || 0,
+    repositoryOwner: owner,
+    repositoryName: repo,
+  };
+
+  const { downloadPath } = await artifact.downloadArtifact(latest.id, {
+    findBy,
   });
-  const tempDir = process.env['RUNNER_TEMP'] || process.cwd();
-  const zipPath = path.join(tempDir, `repo-artifact-${latest.id}.zip`);
 
-  // Write the ZIP file content to disk
-  await fs.writeFile(zipPath, Buffer.from(resp.data as ArrayBuffer));
-  core.debug(`downloadArtifactArchive: wrote ${zipPath}`);
-  return zipPath;
+  core.debug(`downloadArtifactArchive: wrote to ${downloadPath}`);
+  return downloadPath;
 }
-
-/**
- * Extracts the timestamp content from a downloaded artifact ZIP file.
- * Looks for the expected filename and returns its content as a string.
- * @param zipPath Path to the ZIP file containing the timestamp artifact
- * @returns The extracted timestamp string or null if extraction fails
- */
-async function extractTimestampFromZip(zipPath: string): Promise<string | null> {
-  try {
-    const zip = new AdmZip(zipPath);
-    const entry = zip.getEntry(FILENAME);
-    if (!entry) {
-      core.debug('extractTimestampFromZip: entry not found');
-      return null;
-    }
-    const content = zip.readAsText(entry).trim();
-    core.debug('extractTimestampFromZip: extracted timestamp');
-    return content;
-  } catch (err: any) {
-    core.warning(`Failed to extract zip: ${err.message || err}`);
-    return null;
-  }
-}
-
-// Removed custom retryAsync in favor of async-retry for clearer semantics and backoff handling.
 
 // Auto-execute only when run directly by Node (GitHub Actions runtime)
 if (require.main === module) {
@@ -390,6 +382,5 @@ export const __test__ = {
   listRepoArtifactsByName,
   fetchLatestRepoArtifact,
   downloadArtifactArchive,
-  extractTimestampFromZip,
   validateIsoTimestamp,
 };
