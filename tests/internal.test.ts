@@ -9,10 +9,10 @@ jest.mock('@actions/artifact', () => {
   class MockArtifactClient {
     // For these internal helper tests we only need downloadArtifact when token provided
     async downloadArtifact(id: number): Promise<{ downloadPath: string }> {
-      // create a trivial zip with or without file handled in specific tests (they call extract directly)
-      const tmp = path.join(process.cwd(), `internal-${id}.zip`);
-      await fs.writeFile(tmp, Buffer.from('PK\x05\x06' + '\x00'.repeat(18), 'binary')); // minimal empty zip
-      return { downloadPath: tmp };
+      // create a trivial directory to simulate extracted artifact contents (empty)
+      const tmpDir = path.join(process.cwd(), `internal-${id}`);
+      await fs.mkdir(tmpDir, { recursive: true });
+      return { downloadPath: tmpDir };
     }
   }
   return { DefaultArtifactClient: MockArtifactClient };
@@ -31,14 +31,7 @@ jest.mock('@actions/github', () => ({
   context: { repo: { owner: 'o', repo: 'r' } },
 }));
 
-function makeZip(files: Record<string, string>) {
-  const AdmZip = require('adm-zip');
-  const zip = new AdmZip();
-  for (const [name, content] of Object.entries(files)) {
-    zip.addFile(name, Buffer.from(content, 'utf8'));
-  }
-  return zip.toBuffer();
-}
+// Zip helper removed after migration to direct directory artifact handling.
 
 describe('internal helpers', () => {
   beforeEach(() => {
@@ -121,7 +114,7 @@ describe('internal helpers', () => {
     expect(v).toBeNull();
   });
 
-  test('downloadArtifactArchive writes zip (uses mocked artifact client)', async () => {
+  test('downloadArtifactArchive returns path (uses mocked artifact client)', async () => {
     process.env.GITHUB_TOKEN = 't';
     const meta = {
       id: 9,
@@ -144,27 +137,6 @@ describe('internal helpers', () => {
         .catch(() => false);
       expect(exists).toBe(true);
     }
-  });
-
-  test('extractTimestampFromZip success + validation', async () => {
-    const AdmZip = require('adm-zip');
-    const zip = new AdmZip();
-    zip.addFile('last-run.txt', Buffer.from('2025-01-01T00:00:00.000Z', 'utf8'));
-    const buf = zip.toBuffer();
-    const tmp = path.join(process.cwd(), 'tmp-test.zip');
-    await fs.writeFile(tmp, buf);
-    const value = await __test__.extractTimestampFromZip(tmp);
-    expect(value).toBe('2025-01-01T00:00:00.000Z');
-  });
-
-  test('extractTimestampFromZip missing entry returns null', async () => {
-    const AdmZip = require('adm-zip');
-    const zip = new AdmZip();
-    const buf = zip.toBuffer();
-    const tmp = path.join(process.cwd(), 'tmp-test2.zip');
-    await fs.writeFile(tmp, buf);
-    const value = await __test__.extractTimestampFromZip(tmp);
-    expect(value).toBeNull();
   });
 
   test('validateIsoTimestamp identifies invalid patterns and parse errors', () => {

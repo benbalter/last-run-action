@@ -54,11 +54,16 @@ function setInputs(inputs: Record<string, string>) {
   for (const [k, v] of Object.entries(inputs)) process.env[`INPUT_${k.toUpperCase()}`] = v;
 }
 
-function zipWith(content: string | null): Buffer {
-  const AdmZip = require('adm-zip');
-  const zip = new AdmZip();
-  if (content !== null) zip.addFile('last-run.txt', Buffer.from(content, 'utf8'));
-  return zip.toBuffer();
+// Helper to simulate artifact download by writing extracted file directly into directory
+function writeArtifactDir(artifactId: number, content: string | null | undefined) {
+  const fs = require('fs');
+  const path = require('path');
+  const dir = path.join(process.cwd(), `artifact-${artifactId}`);
+  fs.mkdirSync(dir, { recursive: true });
+  if (content !== null && content !== undefined) {
+    fs.writeFileSync(path.join(dir, 'last-run.txt'), content, 'utf8');
+  }
+  return dir;
 }
 
 function mockRepoArtifact(options: {
@@ -94,14 +99,9 @@ function mockRepoArtifact(options: {
   ];
   listArtifactsMock.mockResolvedValueOnce({ data: { artifacts: artifactsPage } });
   if (content !== undefined) {
-    const data = content === null ? zipWith(null) : zipWith(content);
-    // Configure downloadArtifactMock for this artifact id
     downloadArtifactMock.mockImplementationOnce(async (artifactId: number) => {
-      const fs = require('fs');
-      const path = require('path');
-      const tmp = path.join(process.cwd(), `artifact-${artifactId}.zip`);
-      fs.writeFileSync(tmp, data);
-      return { downloadPath: tmp };
+      const dir = writeArtifactDir(artifactId, content);
+      return { downloadPath: dir };
     });
   }
   return { id, created_at, content };
@@ -236,7 +236,8 @@ test('expired artifacts ignored (no viable)', async () => {
   expect(coreMock.setOutput).not.toHaveBeenCalled();
 });
 
-test('missing file inside zip returns no output', async () => {
+// Directory missing file should yield no output
+test('missing timestamp file in artifact directory yields no output', async () => {
   jest.clearAllMocks();
   coreMock.getInput.mockImplementation(
     (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
@@ -262,13 +263,16 @@ test('missing file inside zip returns no output', async () => {
   downloadArtifactMock.mockImplementationOnce(async (artifactId: number) => {
     const fs = require('fs');
     const path = require('path');
-    const tmp = path.join(process.cwd(), `artifact-${artifactId}.zip`);
-    fs.writeFileSync(tmp, zipWith(null));
-    return { downloadPath: tmp };
+    const dir = writeArtifactDir(artifactId, null); // create empty directory
+    // Ensure no stray file exists from previous runs
+    const file = path.join(dir, 'last-run.txt');
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    return { downloadPath: dir };
   });
   setInputs({ mode: 'get' });
   await run();
   const outputs = (coreMock.setOutput as jest.Mock).mock.calls.filter((c) => c[0] === 'last-run');
+  // Should not have produced output when file missing
   expect(outputs.length).toBe(0);
 });
 
@@ -345,36 +349,6 @@ test('parse-invalid timestamp triggers warning and no output', async () => {
   if (!wasSet) {
     expect(coreMock.warning).toHaveBeenCalled();
   }
-});
-
-test('corrupted zip triggers warning and no output', async () => {
-  const ts = new Date().toISOString();
-  process.env.GITHUB_TOKEN = 'token';
-  listArtifactsMock.mockResolvedValueOnce({
-    data: {
-      artifacts: [
-        {
-          id: 111,
-          name: 'last-run',
-          created_at: ts,
-          expired: false,
-          archive_download_url: 'GET /repos/o/r/actions/artifacts/111/zip',
-        },
-      ],
-    },
-  });
-  // Provide invalid (non-zip) buffer
-  downloadArtifactMock.mockImplementationOnce(async (artifactId: number) => {
-    const fs = require('fs');
-    const path = require('path');
-    const tmp = path.join(process.cwd(), `artifact-${artifactId}.zip`);
-    fs.writeFileSync(tmp, Buffer.from('not-a-zip'));
-    return { downloadPath: tmp };
-  });
-  setInputs({ mode: 'get' });
-  await run();
-  expect(coreMock.setOutput).not.toHaveBeenCalled();
-  expect(coreMock.warning).toHaveBeenCalled();
 });
 
 test('upload failure surfaces via set mode', async () => {
