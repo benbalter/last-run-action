@@ -8,7 +8,7 @@ read-then-write the value.
 ```yaml
 # Example: capture previous timestamp then do work and update afterward (two steps)
 permissions:
-  actions: write   # write needed because we will upload in the second step
+  actions: write # write needed because we will upload in the second step
 
 jobs:
   build:
@@ -85,11 +85,11 @@ If you attempt an upload without `actions: write`, the step will fail during the
 
 ### Behavior summary
 
-| Mode                               | Reads previous | Outputs `last-run`       | Uploads new timestamp |
-| ---------------------------------- | -------------- | ------------------------ | --------------------- |
-| get                                | Yes            | Yes (if found & valid)   | No                    |
-| set                                | No             | No                       | Yes                   |
-| get-and-set / getset / get_and_set | Yes            | Yes (previous value)     | Yes (new)             |
+| Mode                               | Reads previous | Outputs `last-run`     | Uploads new timestamp |
+| ---------------------------------- | -------------- | ---------------------- | --------------------- |
+| get                                | Yes            | Yes (if found & valid) | No                    |
+| set                                | No             | No                     | Yes                   |
+| get-and-set / getset / get_and_set | Yes            | Yes (previous value)   | Yes (new)             |
 
 Aliases `getset` and `get_and_set` behave identically to `get-and-set`.
 
