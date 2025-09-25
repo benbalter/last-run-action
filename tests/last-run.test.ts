@@ -359,4 +359,4 @@ test('upload failure surfaces via set mode', async () => {
   setInputs({ mode: 'set' });
   await run();
   expect(coreMock.setFailed).toHaveBeenCalledWith(expect.stringContaining('boom-upload'));
-});
+}, 15000); // Increased timeout to account for retries
