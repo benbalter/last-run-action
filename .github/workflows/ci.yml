@@ -19,7 +19,7 @@ jobs:
       node-version: '20'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
@@ -41,7 +41,7 @@ jobs:
     needs: prepare
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Download deps
         uses: actions/download-artifact@v5
         with:
@@ -59,7 +59,7 @@ jobs:
     needs: prepare
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Download deps
         uses: actions/download-artifact@v5
         with:
@@ -81,7 +81,7 @@ jobs:
     needs: [lint, test]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
       - name: Download deps
         uses: actions/download-artifact@v5
         with:
