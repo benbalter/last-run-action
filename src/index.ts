@@ -5,6 +5,7 @@ import * as github from '@actions/github';
 import { promises as fs } from 'fs';
 import * as path from 'path';
 import { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
+import retry from 'async-retry';
 
 // Constants for artifact management
 const ARTIFACT_NAME = 'last-run';
@@ -190,6 +191,7 @@ function deriveOperations(mode: string): Operations {
 /**
  * Uploads a timestamp value as an artifact to GitHub Actions.
  * Creates a temporary file with the timestamp and uploads it with 90-day retention.
+ * Implements exponential backoff retry for upload failures.
  * @param value The ISO timestamp string to upload
  */
 export async function uploadTimestamp(value: string): Promise<void> {
@@ -204,7 +206,23 @@ export async function uploadTimestamp(value: string): Promise<void> {
   core.debug(`uploadTimestamp: wrote file ${filePath}`);
 
   // Upload the file as an artifact with 90-day retention
-  await client.uploadArtifact(ARTIFACT_NAME, [filePath], tempDir, { retentionDays: 90 });
+  await retry(
+    async (bail: (err: Error) => void, attemptNumber: number) => {
+      try {
+        await client.uploadArtifact(ARTIFACT_NAME, [filePath], tempDir, { retentionDays: 90 });
+      } catch (error: any) {
+        core.debug(`uploadTimestamp: attempt ${attemptNumber} failed: ${error.message}`);
+        throw error;
+      }
+    },
+    {
+      retries: 3,
+      factor: 2,
+      minTimeout: 1000,
+      maxTimeout: 10000,
+      randomize: false,
+    },
+  );
   core.debug(`uploadTimestamp: uploaded artifact '${ARTIFACT_NAME}'`);
 }
 
@@ -269,6 +287,7 @@ type Artifact =
 /**
  * Retrieves artifacts from the repository that match the specified name.
  * Returns only the first page of results since the name filter is applied server-side.
+ * Implements exponential backoff retry for API failures.
  * @param name The artifact name to search for (e.g., 'last-run')
  * @returns Array of matching artifact summaries, empty if none found or no token available
  */
@@ -283,10 +302,32 @@ async function listRepoArtifactsByName(name: string): Promise<Artifact[]> {
   const per_page = 100;
 
   core.debug('listRepoArtifactsByName: fetching first page');
-  const resp = await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, name });
-  const artifacts = resp.data.artifacts;
-  core.debug(`listRepoArtifactsByName: found ${artifacts.length} artifacts`);
-  return artifacts;
+
+  try {
+    const resp = await retry(
+      async (bail: (err: Error) => void, attemptNumber: number) => {
+        try {
+          return await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, name });
+        } catch (error: any) {
+          core.debug(`listRepoArtifactsByName: attempt ${attemptNumber} failed: ${error.message}`);
+          throw error;
+        }
+      },
+      {
+        retries: 3,
+        factor: 2,
+        minTimeout: 1000,
+        maxTimeout: 10000,
+        randomize: false,
+      },
+    );
+    const artifacts = resp.data.artifacts;
+    core.debug(`listRepoArtifactsByName: found ${artifacts.length} artifacts`);
+    return artifacts;
+  } catch (error: any) {
+    core.warning(`Failed to list repository artifacts after retries: ${error.message || error}`);
+    return [];
+  }
 }
 
 /**
@@ -342,6 +383,7 @@ async function fetchLatestRepoArtifact(): Promise<Artifact | null> {
 /**
  * Downloads an artifact archive from GitHub and saves it to a temporary file.
  * Uses the GitHub REST API to download the artifact as a ZIP file.
+ * Implements exponential backoff retry for download failures.
  * @param latest Metadata for the artifact to download
  * @returns Path to the downloaded ZIP file or null if download fails
  */
@@ -362,17 +404,37 @@ async function downloadArtifactArchive(latest: Artifact): Promise<string | null 
     repositoryName: repo,
   };
 
-  const { downloadPath } = await artifact.downloadArtifact(latest.id, {
-    findBy,
-  });
+  try {
+    const { downloadPath } = await retry(
+      async (bail: (err: Error) => void, attemptNumber: number) => {
+        try {
+          return await artifact.downloadArtifact(latest.id, {
+            findBy,
+          });
+        } catch (error: any) {
+          core.debug(`downloadArtifactArchive: attempt ${attemptNumber} failed: ${error.message}`);
+          throw error;
+        }
+      },
+      {
+        retries: 3,
+        factor: 2,
+        minTimeout: 1000,
+        maxTimeout: 10000,
+        randomize: false,
+      },
+    );
 
-  core.debug(`downloadArtifactArchive: wrote to ${downloadPath}`);
-  return downloadPath;
+    core.debug(`downloadArtifactArchive: wrote to ${downloadPath}`);
+    return downloadPath;
+  } catch (error: any) {
+    core.warning(`Failed to download artifact archive after retries: ${error.message || error}`);
+    return null;
+  }
 }
 
 // Auto-execute only when run directly by Node (GitHub Actions runtime)
 if (require.main === module) {
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
   run();
 }
 
