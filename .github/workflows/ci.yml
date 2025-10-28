@@ -43,7 +43,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Download deps
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: deps-node_modules
       - name: Extract deps
@@ -61,7 +61,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Download deps
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: deps-node_modules
       - name: Extract deps
@@ -83,7 +83,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
       - name: Download deps
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v6
         with:
           name: deps-node_modules
       - name: Extract deps
