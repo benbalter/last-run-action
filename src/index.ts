@@ -11,6 +11,14 @@ import retry from 'async-retry';
 const ARTIFACT_NAME = 'last-run';
 const FILENAME = 'last-run.txt';
 
+const RETRY_OPTIONS = {
+  retries: 3,
+  factor: 2,
+  minTimeout: 1000,
+  maxTimeout: 10000,
+  randomize: false,
+} as const;
+
 /**
  * Main entry point for the GitHub Action.
  *
@@ -206,23 +214,14 @@ export async function uploadTimestamp(value: string): Promise<void> {
   core.debug(`uploadTimestamp: wrote file ${filePath}`);
 
   // Upload the file as an artifact with 90-day retention
-  await retry(
-    async (bail: (err: Error) => void, attemptNumber: number) => {
-      try {
-        await client.uploadArtifact(ARTIFACT_NAME, [filePath], tempDir, { retentionDays: 90 });
-      } catch (error: any) {
-        core.debug(`uploadTimestamp: attempt ${attemptNumber} failed: ${error.message}`);
-        throw error;
-      }
-    },
-    {
-      retries: 3,
-      factor: 2,
-      minTimeout: 1000,
-      maxTimeout: 10000,
-      randomize: false,
-    },
-  );
+  await retry(async (bail: (err: Error) => void, attemptNumber: number) => {
+    try {
+      await client.uploadArtifact(ARTIFACT_NAME, [filePath], tempDir, { retentionDays: 90 });
+    } catch (error: any) {
+      core.debug(`uploadTimestamp: attempt ${attemptNumber} failed: ${error.message}`);
+      throw error;
+    }
+  }, RETRY_OPTIONS);
   core.debug(`uploadTimestamp: uploaded artifact '${ARTIFACT_NAME}'`);
 }
 
@@ -262,7 +261,6 @@ export function validateIsoTimestamp(value: string | null | undefined): {
  */
 async function downloadTimestampWithValidation(): Promise<string | null> {
   core.debug('downloadTimestampWithValidation: start');
-  core.startGroup('Download & validate timestamp');
   const value = await downloadTimestamp();
   core.debug(`downloadTimestampWithValidation: raw='${value}'`);
   const validation = validateIsoTimestamp(value);
@@ -273,11 +271,9 @@ async function downloadTimestampWithValidation(): Promise<string | null> {
     } else if (validation.reason === 'parse') {
       core.warning(`Timestamp parse failed: '${value}'`);
     }
-    core.endGroup();
     return null;
   }
   core.debug('downloadTimestampWithValidation: success');
-  core.endGroup();
   return value!;
 }
 
@@ -304,23 +300,14 @@ async function listRepoArtifactsByName(name: string): Promise<Artifact[]> {
   core.debug('listRepoArtifactsByName: fetching first page');
 
   try {
-    const resp = await retry(
-      async (bail: (err: Error) => void, attemptNumber: number) => {
-        try {
-          return await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, name });
-        } catch (error: any) {
-          core.debug(`listRepoArtifactsByName: attempt ${attemptNumber} failed: ${error.message}`);
-          throw error;
-        }
-      },
-      {
-        retries: 3,
-        factor: 2,
-        minTimeout: 1000,
-        maxTimeout: 10000,
-        randomize: false,
-      },
-    );
+    const resp = await retry(async (bail: (err: Error) => void, attemptNumber: number) => {
+      try {
+        return await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, name });
+      } catch (error: any) {
+        core.debug(`listRepoArtifactsByName: attempt ${attemptNumber} failed: ${error.message}`);
+        throw error;
+      }
+    }, RETRY_OPTIONS);
     const artifacts = resp.data.artifacts;
     core.debug(`listRepoArtifactsByName: found ${artifacts.length} artifacts`);
     return artifacts;
@@ -348,7 +335,7 @@ export async function downloadTimestamp(): Promise<string | null> {
       core.warning(`Timestamp file not found: ${filePath}`);
       return null;
     }
-    const timestamp = await fs.readFile(filePath, 'utf8');
+    const timestamp = (await fs.readFile(filePath, 'utf8')).trim();
     return timestamp;
   } catch (err: any) {
     core.warning(`Repo-level artifact lookup failed: ${err.message || err}`);
@@ -400,7 +387,7 @@ async function downloadArtifactArchive(latest: Artifact): Promise<string | null>
 
   const { owner, repo } = github.context.repo;
   const findBy = {
-    token: process.env['GITHUB_TOKEN'] || '',
+    token,
     workflowRunId: latest.workflow_run?.id || 0,
     repositoryOwner: owner,
     repositoryName: repo,
@@ -418,13 +405,7 @@ async function downloadArtifactArchive(latest: Artifact): Promise<string | null>
           throw error;
         }
       },
-      {
-        retries: 3,
-        factor: 2,
-        minTimeout: 1000,
-        maxTimeout: 10000,
-        randomize: false,
-      },
+      RETRY_OPTIONS,
     );
 
     core.debug(`downloadArtifactArchive: wrote to ${downloadPath}`);

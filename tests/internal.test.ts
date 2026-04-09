@@ -22,11 +22,9 @@ jest.mock('@actions/core');
 
 // Minimal mocks for github
 const listArtifactsForRepo = jest.fn();
-const request = jest.fn();
 jest.mock('@actions/github', () => ({
   getOctokit: () => ({
     rest: { actions: { listArtifactsForRepo } },
-    request,
   }),
   context: { repo: { owner: 'o', repo: 'r' } },
 }));

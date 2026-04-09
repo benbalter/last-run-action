@@ -45,6 +45,5 @@ module.exports = defineConfig([
       'no-console': 'off',
     },
   },
-  globalIgnores(['**/dist/', '**/lib/']),
-  globalIgnores(['**/dist', '**/lib', '**/node_modules']),
+  globalIgnores(['**/dist/', '**/lib/', '**/node_modules/']),
 ]);

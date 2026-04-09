@@ -1,7 +1,6 @@
 // Repo-level primary retrieval test suite
 import { run } from '../src/index';
 import * as core from '@actions/core';
-import { DefaultArtifactClient } from '@actions/artifact';
 
 jest.mock('@actions/core');
 

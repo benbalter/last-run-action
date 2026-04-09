@@ -22,11 +22,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           mode: get
-          fail-if-missing: 'true'
+          fail-if-missing: 'false'
 
       - name: Echo last run
         run: |
-          echo "Previous run timestamp: ${{ steps.get.outputs.last-run }}"
+          ts="${{ steps.get.outputs.last-run }}"
+          if [ -z "$ts" ]; then
+            echo "No previous run found (first run)"
+          else
+            echo "Previous run timestamp: $ts"
+          fi
 
       - name: Set last run
         uses: benbalter/last-run-action@main
