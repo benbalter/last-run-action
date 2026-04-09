@@ -138,5 +138,3 @@ This repository is configured with Dependabot to automatically open pull request
 
 - npm production and dev dependency updates (weekly; minor and patch changes grouped)
 - GitHub Actions workflow updates (weekly)
-
-The TypeScript version is pinned to `5.3.3` to align with the current ESLint / `@typescript-eslint` support range; Dependabot is configured to ignore newer TypeScript versions until toolchain support is updated. Adjust `.github/dependabot.yml` if you wish to allow automatic TypeScript bumps.

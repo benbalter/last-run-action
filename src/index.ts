@@ -341,12 +341,14 @@ export async function downloadTimestamp(): Promise<string | null> {
     if (!latest) return null;
     const dir = await downloadArtifactArchive(latest);
     if (!dir) return null;
-    const path = `${dir}/${FILENAME}`;
-    if (!(await fs.stat(path))) {
-      core.warning(`Timestamp file not found: ${path}`);
+    const filePath = path.join(dir, FILENAME);
+    try {
+      await fs.access(filePath);
+    } catch {
+      core.warning(`Timestamp file not found: ${filePath}`);
       return null;
     }
-    const timestamp = await fs.readFile(path, 'utf8');
+    const timestamp = await fs.readFile(filePath, 'utf8');
     return timestamp;
   } catch (err: any) {
     core.warning(`Repo-level artifact lookup failed: ${err.message || err}`);
@@ -387,7 +389,7 @@ async function fetchLatestRepoArtifact(): Promise<Artifact | null> {
  * @param latest Metadata for the artifact to download
  * @returns Path to the downloaded ZIP file or null if download fails
  */
-async function downloadArtifactArchive(latest: Artifact): Promise<string | null | undefined> {
+async function downloadArtifactArchive(latest: Artifact): Promise<string | null> {
   const artifact = new DefaultArtifactClient();
   const token = process.env.GITHUB_TOKEN;
 
@@ -426,7 +428,7 @@ async function downloadArtifactArchive(latest: Artifact): Promise<string | null 
     );
 
     core.debug(`downloadArtifactArchive: wrote to ${downloadPath}`);
-    return downloadPath;
+    return downloadPath ?? null;
   } catch (error: any) {
     core.warning(`Failed to download artifact archive after retries: ${error.message || error}`);
     return null;

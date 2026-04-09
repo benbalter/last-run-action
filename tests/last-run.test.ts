@@ -8,30 +8,7 @@ jest.mock('@actions/core');
 // In-memory storage of last uploaded timestamp value (simulates contents of artifact before zipped on download)
 const uploaded: { value?: string } = {};
 
-// Mock artifact client for upload path (set operations)
-jest.mock('@actions/artifact', () => {
-  const fs = require('fs');
-  class MockArtifactClient {
-    async uploadArtifact(name: string, files: string[]) {
-      if (name !== 'last-run') throw new Error('unexpected artifact name');
-      const filePath = files[0];
-      uploaded.value = fs.readFileSync(filePath, 'utf8');
-      return { id: 999, size: (uploaded.value || '').length, name };
-    }
-  }
-  return { DefaultArtifactClient: MockArtifactClient };
-});
-
-// Mocks for repo-level listing & download
-const listArtifactsMock = jest.fn();
-jest.mock('@actions/github', () => ({
-  getOctokit: () => ({
-    rest: { actions: { listArtifactsForRepo: listArtifactsMock } },
-  }),
-  context: { repo: { owner: 'o', repo: 'r' } },
-}));
-
-// Mock the artifact download path via DefaultArtifactClient.downloadArtifact to return our zip buffer
+// Mock artifact client for both upload and download paths
 const downloadArtifactMock = jest.fn();
 jest.mock('@actions/artifact', () => {
   class MockArtifactClient {
@@ -47,6 +24,15 @@ jest.mock('@actions/artifact', () => {
   }
   return { DefaultArtifactClient: MockArtifactClient };
 });
+
+// Mocks for repo-level listing & download
+const listArtifactsMock = jest.fn();
+jest.mock('@actions/github', () => ({
+  getOctokit: () => ({
+    rest: { actions: { listArtifactsForRepo: listArtifactsMock } },
+  }),
+  context: { repo: { owner: 'o', repo: 'r' } },
+}));
 
 const coreMock = core as jest.Mocked<typeof core>;
 

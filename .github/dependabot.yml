@@ -12,9 +12,7 @@ updates:
         update-types:
           - 'minor'
           - 'patch'
-    ignore:
-      - dependency-name: 'typescript'
-        versions: ['>5.3.3']
+    ignore: []
   - package-ecosystem: 'github-actions'
     directory: '/'
     schedule:
