@@ -16,6 +16,8 @@ inputs:
 outputs:
   last-run:
     description: 'The last time the workflow was run, in ISO 8601 format.'
+  first-run:
+    description: "'true' when no prior timestamp was found (first run / newly seeded); 'false' otherwise. Only meaningful for modes that include `get`."
 runs:
   using: 'node20'
   main: 'dist/index.js'

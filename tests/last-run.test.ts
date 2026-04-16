@@ -126,13 +126,18 @@ test('mode get retrieves existing repo artifact', async () => {
   expect(coreMock.setOutput).toHaveBeenCalledWith('last-run', ts);
 });
 
-test('mode get with no token yields no output and warning', async () => {
+test('mode get with no prior artifact seeds timestamp and emits first-run output', async () => {
   const warnings: string[] = [];
   (coreMock.warning as any).mockImplementation((m: string) => warnings.push(m));
   setInputs({ mode: 'get' });
   await run();
-  expect(coreMock.setOutput).not.toHaveBeenCalled();
-  expect(warnings.some((w) => w.includes('No valid previous run timestamp'))).toBe(true);
+  // No previous value output
+  expect(coreMock.setOutput).not.toHaveBeenCalledWith('last-run', expect.anything());
+  // first-run signal emitted
+  expect(coreMock.setOutput).toHaveBeenCalledWith('first-run', 'true');
+  // A seed upload occurred
+  expect(uploaded.value).toBeTruthy();
+  expect(warnings.some((w) => w.includes('first run'))).toBe(true);
 });
 
 test('mode get-and-set returns previous then uploads newer timestamp', async () => {
@@ -218,10 +223,10 @@ test('expired artifacts ignored (no viable)', async () => {
   });
   setInputs({ mode: 'get' });
   await run();
-  expect(coreMock.setOutput).not.toHaveBeenCalled();
+  expect(
+    (coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run'),
+  ).toBe(false);
 });
-
-// Directory missing file should yield no output
 test('missing timestamp file in artifact directory yields no output', async () => {
   jest.clearAllMocks();
   coreMock.getInput.mockImplementation(
@@ -298,7 +303,9 @@ test('listRepoArtifactsByName no token path returns empty (indirectly no output)
   jest.clearAllMocks();
   setInputs({ mode: 'get' });
   await run();
-  expect(coreMock.setOutput).not.toHaveBeenCalled();
+  expect(
+    (coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run'),
+  ).toBe(false);
 });
 
 test('pattern-invalid timestamp triggers warning and no output', async () => {

@@ -35,6 +35,12 @@ const RETRY_OPTIONS = {
  *   the new timestamp upload STILL proceeds. This design ensures subsequent runs have a baseline
  *   timestamp even if the first retrieval attempt failed.
  *
+ * First-run seeding:
+ *   When `mode: get` is used and no prior timestamp exists (and `fail-if-missing` is false),
+ *   the action automatically uploads a fresh timestamp to seed the repository artifact. This
+ *   makes the common "since last run" pattern work on the very first invocation without
+ *   requiring a separate `set` step. The `first-run` output is set to `'true'` in this case.
+ *
  * Monotonicity:
  *   In combined `get-and-set` modes a loop waits (at microsecond resolution governed by Date.now())
  *   until the newly generated ISO timestamp string is strictly greater than the previous to avoid
@@ -47,6 +53,7 @@ export async function run(): Promise<void> {
     core.debug(`Effective operations: ${JSON.stringify(operations)} (mode='${mode}')`);
 
     let retrieved: string | null = null;
+    let firstRun = false;
 
     // Retrieve previous timestamp if requested
     if (operations.get) {
@@ -55,9 +62,22 @@ export async function run(): Promise<void> {
       core.endGroup();
     }
 
-    // Store current timestamp if requested
+    // First-run seeding: if a caller only requested `get` and no prior timestamp
+    // exists (and we aren't failing the run), automatically upload a fresh
+    // timestamp so the next run finds a baseline. This makes the common
+    // "since last run" pattern work on the very first invocation without
+    // requiring the user to pre-seed via a separate `set` step.
+    if (operations.get && !operations.set && !retrieved && !failIfMissing) {
+      firstRun = true;
+      operations.set = true;
+    }
+
+    // Always expose a boolean first-run signal for downstream steps.
+    core.setOutput('first-run', firstRun && operations.get ? 'true' : 'false');
+
+    // Store current timestamp if requested (or seed on first run)
     if (operations.set) {
-      core.startGroup('Store current timestamp');
+      core.startGroup(firstRun ? 'Seed first run timestamp' : 'Store current timestamp');
       await setLastRun(retrieved);
       core.endGroup();
     }
@@ -130,7 +150,9 @@ async function getLastRun(failIfMissing: boolean): Promise<string | null> {
     return null;
   }
   core.debug('getLastRun: missing timestamp but not failing');
-  core.warning(msg);
+  core.warning(
+    `${msg} Treating this as the first run and seeding a new timestamp so future runs have a baseline.`,
+  );
   return null;
 }
 

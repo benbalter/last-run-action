@@ -64,7 +64,25 @@ Inputs:
 
 ## Outputs
 
-- `last-run`: The last time the workflow was run, in ISO 8601 format.
+- `last-run`: The last time the workflow was run, in ISO 8601 format. Omitted on first run
+  (when there is no previously stored timestamp).
+- `first-run`: `'true'` when no prior timestamp was found (a fresh baseline was seeded);
+  `'false'` otherwise. Only meaningful for modes that include `get`.
+
+## First run behavior
+
+On the very first invocation there is no stored timestamp to retrieve. To make the common
+"do work since last run" pattern work without requiring a separate bootstrap step:
+
+- With `mode: get` (default) and `fail-if-missing: false`: a warning is logged, the `last-run`
+  output is omitted, `first-run` is set to `'true'`, and the action automatically uploads the
+  current timestamp so the next run has a baseline. This requires `actions: write` permissions.
+- With `mode: get-and-set`: the previous value is absent (no `last-run` output), `first-run`
+  is set to `'true'`, and the new timestamp is uploaded as usual.
+- With `fail-if-missing: true`: the action fails; no seeding occurs.
+
+Downstream steps can guard first-run logic with `if: steps.last-run.outputs.first-run != 'true'`
+(or invert it to run one-time bootstrap work only on the first invocation).
 
 ## How it works
 
@@ -79,9 +97,11 @@ Retrieval (current implementation) performs a repository-level artifact listing 
 Permissions:
 
 - Reading existing timestamp: `actions: read` (listing & downloading artifacts)
-- Writing new timestamp (modes `set`, `get-and-set`): `actions: write`
+- Writing new timestamp (modes `set`, `get-and-set`, or first-run seeding in `get`): `actions: write`
 
 If you attempt an upload without `actions: write`, the step will fail during the upload phase.
+To opt out of first-run seeding in `get` mode, set `fail-if-missing: true` (the action will
+fail instead) or pre-seed the repository with a `mode: set` step under `actions: write`.
 
 ### Behavior summary
 
