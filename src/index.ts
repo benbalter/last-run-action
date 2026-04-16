@@ -280,10 +280,21 @@ async function downloadTimestampWithValidation(): Promise<string | null> {
 type Artifact =
   RestEndpointMethodTypes['actions']['listArtifactsForRepo']['response']['data']['artifacts'][number];
 
+// Max pages to fetch when listing artifacts. With per_page=100 this caps the
+// defensive scan at 1000 artifacts. This guards against GitHub Actions API
+// eventual-consistency windows where the newest matching artifact may not
+// appear on the first page during scheduling-delay backlogs (see
+// github/discussion-roundup-action#138 for the analogous listWorkflowRuns bug).
+const MAX_ARTIFACT_PAGES = 10;
+const ARTIFACTS_PER_PAGE = 100;
+
 /**
  * Retrieves artifacts from the repository that match the specified name.
- * Returns only the first page of results since the name filter is applied server-side.
- * Implements exponential backoff retry for API failures.
+ * Paginates across multiple pages (up to MAX_ARTIFACT_PAGES) and aggregates
+ * results so the client-side sort in {@link fetchLatestRepoArtifact} has
+ * enough data to reliably identify the newest artifact even if the API
+ * returns mildly out-of-order results during eventual-consistency windows.
+ * Implements exponential backoff retry for API failures on each page.
  * @param name The artifact name to search for (e.g., 'last-run')
  * @returns Array of matching artifact summaries, empty if none found or no token available
  */
@@ -295,26 +306,43 @@ async function listRepoArtifactsByName(name: string): Promise<Artifact[]> {
   }
   const octokit = github.getOctokit(token);
   const { owner, repo } = github.context.repo;
-  const per_page = 100;
+  const per_page = ARTIFACTS_PER_PAGE;
+  const all: Artifact[] = [];
 
-  core.debug('listRepoArtifactsByName: fetching first page');
-
-  try {
-    const resp = await retry(async (bail: (err: Error) => void, attemptNumber: number) => {
-      try {
-        return await octokit.rest.actions.listArtifactsForRepo({ owner, repo, per_page, name });
-      } catch (error: any) {
-        core.debug(`listRepoArtifactsByName: attempt ${attemptNumber} failed: ${error.message}`);
-        throw error;
-      }
-    }, RETRY_OPTIONS);
-    const artifacts = resp.data.artifacts;
-    core.debug(`listRepoArtifactsByName: found ${artifacts.length} artifacts`);
-    return artifacts;
-  } catch (error: any) {
-    core.warning(`Failed to list repository artifacts after retries: ${error.message || error}`);
-    return [];
+  for (let page = 1; page <= MAX_ARTIFACT_PAGES; page++) {
+    core.debug(`listRepoArtifactsByName: fetching page ${page}`);
+    try {
+      const resp = await retry(async (bail: (err: Error) => void, attemptNumber: number) => {
+        try {
+          return await octokit.rest.actions.listArtifactsForRepo({
+            owner,
+            repo,
+            per_page,
+            name,
+            page,
+          });
+        } catch (error: any) {
+          core.debug(`listRepoArtifactsByName: attempt ${attemptNumber} failed: ${error.message}`);
+          throw error;
+        }
+      }, RETRY_OPTIONS);
+      const artifacts = resp.data.artifacts;
+      core.debug(`listRepoArtifactsByName: page ${page} returned ${artifacts.length} artifacts`);
+      all.push(...artifacts);
+      // Stop once we've drained the listing (partial/empty page means no more).
+      if (artifacts.length < per_page) break;
+    } catch (error: any) {
+      core.warning(
+        `Failed to list repository artifacts after retries on page ${page}: ${error.message || error}`,
+      );
+      // Return whatever we've gathered so far rather than failing hard; the
+      // caller will sort & validate. If this is page 1, we return [].
+      return all;
+    }
   }
+
+  core.debug(`listRepoArtifactsByName: aggregated ${all.length} artifacts`);
+  return all;
 }
 
 /**

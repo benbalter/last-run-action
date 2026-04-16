@@ -143,4 +143,44 @@ describe('internal helpers', () => {
     const good = '2025-12-31T23:59:59.123Z';
     expect(__test__.validateIsoTimestamp(good)).toEqual({ ok: true });
   });
+
+  test('listRepoArtifactsByName paginates until a partial page is returned', async () => {
+    process.env.GITHUB_TOKEN = 't';
+    const fullPage = Array.from({ length: 100 }, (_, i) => ({
+      id: i + 1,
+      name: 'last-run',
+      created_at: `2025-01-${String((i % 28) + 1).padStart(2, '0')}T00:00:00Z`,
+      expired: false,
+      archive_download_url: `u${i + 1}`,
+    }));
+    const partialPage = [
+      {
+        id: 999,
+        name: 'last-run',
+        created_at: '2026-04-16T00:00:00Z',
+        expired: false,
+        archive_download_url: 'u999',
+      },
+    ];
+    listArtifactsForRepo
+      .mockResolvedValueOnce({ data: { artifacts: fullPage } })
+      .mockResolvedValueOnce({ data: { artifacts: partialPage } });
+
+    const res = await __test__.listRepoArtifactsByName('last-run');
+    expect(res.length).toBe(101);
+    // Two pages were fetched; pagination stopped after the partial page.
+    expect(listArtifactsForRepo).toHaveBeenCalledTimes(2);
+    expect(listArtifactsForRepo).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ page: 1, per_page: 100, name: 'last-run' }),
+    );
+    expect(listArtifactsForRepo).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ page: 2, per_page: 100, name: 'last-run' }),
+    );
+    // The newest artifact (from page 2) is included so client-side sort
+    // in fetchLatestRepoArtifact can still identify it even if the API
+    // served it out of order.
+    expect(res.find((a) => a.id === 999)).toBeTruthy();
+  });
 });
