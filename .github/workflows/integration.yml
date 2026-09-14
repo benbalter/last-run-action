@@ -17,7 +17,7 @@ jobs:
     steps:
       - name: Get last run
         id: get
-        uses: benbalter/last-run-action@main
+        uses: benbalter/last-run-action@cd66904323c49698f88ce575a8983b95047b57a1 # main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -34,6 +34,6 @@ jobs:
           fi
 
       - name: Set last run
-        uses: benbalter/last-run-action@main
+        uses: benbalter/last-run-action@cd66904323c49698f88ce575a8983b95047b57a1 # main
         with:
           mode: set
