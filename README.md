@@ -63,9 +63,10 @@ steps:
 - `key` (optional, default `last-run`): Name of the artifact that stores the timestamp. All
   workflows in a repository share the default key, so give each workflow that uses this action
   its own key (e.g. `key: nightly-sync`). Include the branch if runs on different branches
-  should be tracked separately.
-- `retention-days` (optional, default `90`): How long the stored artifact is kept. Must not
-  exceed the repository's artifact retention setting. If the workflow doesn't run within this
+  should be tracked separately. Characters not allowed in artifact names (such as `/` or `:`)
+  are replaced with `-`.
+- `retention-days` (optional, default `90`): How long the stored artifact is kept. Values above
+  the repository's artifact retention setting are capped to it. If the workflow doesn't run within this
   window, the timestamp expires and the next run is treated as a first run.
 - `token` (optional, default `${{ github.token }}`): Token used to list and download artifacts
   from previous runs. Falls back to the `GITHUB_TOKEN` environment variable.

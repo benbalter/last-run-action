@@ -14,11 +14,11 @@ inputs:
     required: false
     default: 'false'
   key:
-    description: 'Name of the artifact that stores the timestamp. Use a distinct key per workflow (or per branch) to track them independently.'
+    description: 'Name of the artifact that stores the timestamp. Use a distinct key per workflow (or per branch) to track them independently. Characters invalid in artifact names (e.g. `/`) are replaced with `-`.'
     required: false
     default: 'last-run'
   retention-days:
-    description: "Days to retain the stored timestamp artifact. Must not exceed the repository's artifact retention limit."
+    description: "Days to retain the stored timestamp artifact. Values above the repository's artifact retention limit are capped to it."
     required: false
     default: '90'
   token:

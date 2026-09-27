@@ -110,7 +110,11 @@ function collectInputs(): CollectedInputs {
   const mode = (modeRaw || 'get').toLowerCase(); // Default to 'get' mode
   const failIfMissing = core.getBooleanInput('fail-if-missing');
   const operations = deriveOperations(mode);
-  const artifactName = core.getInput('key').trim() || DEFAULT_ARTIFACT_NAME;
+  const key = core.getInput('key').trim();
+  const artifactName = sanitizeArtifactName(key) || DEFAULT_ARTIFACT_NAME;
+  if (key && artifactName !== key) {
+    core.debug(`collectInputs: normalized key '${key}' to artifact name '${artifactName}'`);
+  }
 
   const retentionRaw = core.getInput('retention-days').trim();
   const retentionDays = retentionRaw ? Number(retentionRaw) : DEFAULT_RETENTION_DAYS;
@@ -131,6 +135,16 @@ function collectInputs(): CollectedInputs {
     )} artifactName='${artifactName}' retentionDays=${retentionDays}`,
   );
   return { mode, failIfMissing, operations, artifactName, retentionDays, token };
+}
+
+/**
+ * Replaces characters that artifact names may not contain (e.g. the `/` in branch names like
+ * `renovate/foo`) with `-`, so keys built from refs are always valid.
+ * @param key Raw `key` input
+ * @returns A valid artifact name (empty if the key was empty)
+ */
+export function sanitizeArtifactName(key: string): string {
+  return key.replace(/["\\/:<>|*?\r\n]/g, '-');
 }
 
 /**
@@ -540,4 +554,5 @@ export const __test__ = {
   downloadArtifactArchive,
   validateIsoTimestamp,
   nextTimestamp,
+  sanitizeArtifactName,
 };

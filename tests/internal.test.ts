@@ -142,6 +142,11 @@ describe('internal helpers', () => {
     expect(__test__.validateIsoTimestamp(good)).toEqual({ ok: true });
   });
 
+  test('sanitizeArtifactName replaces invalid characters', () => {
+    expect(__test__.sanitizeArtifactName('last-run')).toBe('last-run');
+    expect(__test__.sanitizeArtifactName('a/b\\c:d*e?f"g<h>i|j')).toBe('a-b-c-d-e-f-g-h-i-j');
+  });
+
   test('nextTimestamp is strictly greater than previous', () => {
     const now = Date.parse('2025-01-01T00:00:00.000Z');
     expect(__test__.nextTimestamp(null, now)).toBe('2025-01-01T00:00:00.000Z');

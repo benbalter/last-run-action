@@ -224,6 +224,21 @@ test('key and retention-days inputs control artifact name and retention', async 
   );
 });
 
+test('key with characters invalid in artifact names is normalized', async () => {
+  process.env.GITHUB_TOKEN = 'token';
+  setInputs({ mode: 'get-and-set', key: 'nightly-renovate/foo' });
+  await run();
+  expect(listArtifactsMock).toHaveBeenCalledWith(
+    expect.objectContaining({ name: 'nightly-renovate-foo' }),
+  );
+  expect(uploadArtifactMock).toHaveBeenCalledWith(
+    'nightly-renovate-foo',
+    expect.any(Array),
+    expect.any(String),
+    expect.anything(),
+  );
+});
+
 test('invalid retention-days fails the action', async () => {
   setInputs({ mode: 'set', 'retention-days': 'soon' });
   await run();
