@@ -14,10 +14,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Retrieve previous timestamp
-      - uses: actions/last-run-action@v1
+      - uses: benbalter/last-run-action@v1
         id: last-run
         with:
           mode: get
@@ -28,7 +28,7 @@ jobs:
       - run: echo "(do stuff)"
 
       # Update timestamp
-      - uses: actions/last-run-action@v1
+      - uses: benbalter/last-run-action@v1
         with:
           mode: set
 ```
@@ -40,8 +40,8 @@ permissions:
   actions: write
 
 steps:
-  - uses: actions/checkout@v4
-  - uses: actions/last-run-action@v1
+  - uses: actions/checkout@v5
+  - uses: benbalter/last-run-action@v1
     id: last-run
     with:
       mode: get-and-set
@@ -50,24 +50,34 @@ steps:
 
 ## Inputs
 
-Inputs:
-
-- `mode` (required): One of:
-  - `get` – read a previously stored timestamp and set the `last-run` output (no upload).
-  - `set` – store the current timestamp (no output).
+- `mode` (optional, default `get`): One of:
+  - `get` – read a previously stored timestamp and set the `last-run` output. Uploads only
+    to seed a baseline on the first run (see below).
+  - `set` – store the current timestamp.
   - `get-and-set` – output the previous timestamp then upload a strictly newer timestamp.
     Aliases: `getset`, `get_and_set`.
-  - Any unknown value defaults to `get` (defensive, read‑only behavior).
+  - Any unknown value logs a warning and behaves like a read-only `get` (never uploads).
 - `fail-if-missing` (optional, default `false`): If `true` and no valid previous timestamp is
   found (missing, malformed, or unparsable), the action is marked failed. In combined
   modes the subsequent upload still proceeds so future runs have a seed value.
+- `key` (optional, default `last-run`): Name of the artifact that stores the timestamp. All
+  workflows in a repository share the default key, so give each workflow that uses this action
+  its own key (e.g. `key: nightly-sync`). Include the branch if runs on different branches
+  should be tracked separately.
+- `retention-days` (optional, default `90`): How long the stored artifact is kept. Must not
+  exceed the repository's artifact retention setting. If the workflow doesn't run within this
+  window, the timestamp expires and the next run is treated as a first run.
+- `token` (optional, default `${{ github.token }}`): Token used to list and download artifacts
+  from previous runs. Falls back to the `GITHUB_TOKEN` environment variable.
 
 ## Outputs
 
 - `last-run`: The last time the workflow was run, in ISO 8601 format. Omitted on first run
   (when there is no previously stored timestamp).
-- `first-run`: `'true'` when no prior timestamp was found (a fresh baseline was seeded);
-  `'false'` otherwise. Only meaningful for modes that include `get`.
+- `first-run`: `'true'` when no prior timestamp was found; `'false'` otherwise. Only
+  meaningful for modes that include `get`.
+- `current-run`: The timestamp this step stored, in ISO 8601 format. Set whenever a
+  timestamp is uploaded (`set`, `get-and-set`, or first-run seeding).
 
 ## First run behavior
 
@@ -81,6 +91,9 @@ On the very first invocation there is no stored timestamp to retrieve. To make t
   is set to `'true'`, and the new timestamp is uploaded as usual.
 - With `fail-if-missing: true`: the action fails; no seeding occurs.
 
+A `set` or `get-and-set` step later in the same run replaces the seed, so the two-step
+`get` … `set` pattern works on the first run too.
+
 Downstream steps can guard first-run logic with `if: steps.last-run.outputs.first-run != 'true'`
 (or invert it to run one-time bootstrap work only on the first invocation).
 
@@ -90,11 +103,19 @@ This Action stores the latest run timestamp in a single-file artifact:
 
 Artifact name: `last-run`, file inside: `last-run.txt` containing an ISO 8601 (UTC) timestamp.
 
-Retrieval (current implementation) performs a repository-level artifact listing filtered by name and selects the newest non-expired artifact.
+Retrieval performs a repository-level artifact listing filtered by name (the `key` input) and
+selects the newest non-expired artifact. Artifacts are downloaded into a temporary directory
+under `RUNNER_TEMP`, never into your workspace.
+
+Because the timestamp is repository-wide state, overlapping runs of the same workflow can race.
+Add a `concurrency` group to workflows that use `set` or `get-and-set`:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}
+```
 
 ### Permissions
-
-Permissions:
 
 - Reading existing timestamp: `actions: read` (listing & downloading artifacts)
 - Writing new timestamp (modes `set`, `get-and-set`, or first-run seeding in `get`): `actions: write`
@@ -107,7 +128,7 @@ fail instead) or pre-seed the repository with a `mode: set` step under `actions:
 
 | Mode                               | Reads previous | Outputs `last-run`     | Uploads new timestamp |
 | ---------------------------------- | -------------- | ---------------------- | --------------------- |
-| get                                | Yes            | Yes (if found & valid) | No                    |
+| get                                | Yes            | Yes (if found & valid) | Only on first run     |
 | set                                | No             | No                     | Yes                   |
 | get-and-set / getset / get_and_set | Yes            | Yes (previous value)   | Yes (new)             |
 
@@ -132,7 +153,7 @@ or parse failure is treated the same as absence. In `get-and-set`, the upload st
 
 ## Implementation notes
 
-The artifact format and fallback layering are designed to minimize false negatives while avoiding repository history churn. If no prior run exists, the output is omitted (and a warning logged); with `fail-if-missing: true` the action fails in that case.
+Storing the timestamp in an artifact avoids repository history churn. If no prior run exists, the output is omitted (and a warning logged); with `fail-if-missing: true` the action fails in that case.
 
 ### Timestamp validation
 
@@ -140,7 +161,7 @@ Retrieved values must match the regex `YYYY-MM-DDTHH:mm:ss(.fraction)?Z` and be 
 
 ### Monotonic updates
 
-When using `get-and-set`, a new timestamp is generated after reading the previous one. The action ensures the new timestamp is strictly greater (lexicographically) than the previous to avoid identical millisecond collisions in very fast runs.
+Whenever a previous timestamp was read in the same step, the stored timestamp is at least 1ms later than it, so values strictly increase even with very fast runs or clock skew.
 
 ### Combined mode advantages
 
@@ -154,7 +175,5 @@ the relevant "last" run.
 
 ## Automated dependency updates
 
-This repository is configured with Dependabot to automatically open pull requests for:
-
-- npm production and dev dependency updates (weekly; minor and patch changes grouped)
-- GitHub Actions workflow updates (weekly)
+This repository uses [Renovate](https://docs.renovatebot.com/) (see `renovate.json`) to keep npm
+dependencies and GitHub Actions up to date.

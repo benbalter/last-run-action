@@ -1,6 +1,4 @@
 import { __test__ } from '../src/index';
-import * as core from '@actions/core';
-import * as github from '@actions/github';
 import { promises as fs } from 'fs';
 import path from 'path';
 
@@ -142,6 +140,21 @@ describe('internal helpers', () => {
     expect(__test__.validateIsoTimestamp('not-a-date').ok).toBe(false);
     const good = '2025-12-31T23:59:59.123Z';
     expect(__test__.validateIsoTimestamp(good)).toEqual({ ok: true });
+  });
+
+  test('nextTimestamp is strictly greater than previous', () => {
+    const now = Date.parse('2025-01-01T00:00:00.000Z');
+    expect(__test__.nextTimestamp(null, now)).toBe('2025-01-01T00:00:00.000Z');
+    // previous in the past -> current time
+    expect(__test__.nextTimestamp('2024-12-31T00:00:00Z', now)).toBe('2025-01-01T00:00:00.000Z');
+    // previous equal to now -> +1ms
+    expect(__test__.nextTimestamp('2025-01-01T00:00:00.000Z', now)).toBe(
+      '2025-01-01T00:00:00.001Z',
+    );
+    // previous in the future (clock skew) -> previous +1ms
+    expect(__test__.nextTimestamp('2025-06-01T00:00:00.000Z', now)).toBe(
+      '2025-06-01T00:00:00.001Z',
+    );
   });
 
   test('listRepoArtifactsByName paginates until a partial page is returned', async () => {

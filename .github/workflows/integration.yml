@@ -11,29 +11,58 @@ permissions:
   contents: read
   actions: write
 
+# Runs share the stored timestamp, so don't let them race.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+
 jobs:
   integration:
     runs-on: ubuntu-latest
+    env:
+      # Scope the stored timestamp to this ref so PR runs don't move main's baseline.
+      KEY: integration-${{ github.head_ref || github.ref_name }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
       - name: Get last run
         id: get
-        uses: benbalter/last-run-action@main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: ./
         with:
           mode: get
-          fail-if-missing: 'false'
+          key: ${{ env.KEY }}
 
-      - name: Echo last run
+      - name: Check get outputs
+        env:
+          LAST_RUN: ${{ steps.get.outputs.last-run }}
+          FIRST_RUN: ${{ steps.get.outputs.first-run }}
         run: |
-          ts="${{ steps.get.outputs.last-run }}"
-          if [ -z "$ts" ]; then
-            echo "No previous run found (first run)"
+          echo "last-run='$LAST_RUN' first-run='$FIRST_RUN'"
+          if [ "$FIRST_RUN" = "true" ]; then
+            [ -z "$LAST_RUN" ] || { echo "::error::last-run should be empty on first run"; exit 1; }
           else
-            echo "Previous run timestamp: $ts"
+            [ "$FIRST_RUN" = "false" ] || { echo "::error::unexpected first-run '$FIRST_RUN'"; exit 1; }
+            [ -n "$LAST_RUN" ] || { echo "::error::last-run missing"; exit 1; }
           fi
 
-      - name: Set last run
-        uses: benbalter/last-run-action@main
+      # Runs after a possible first-run seed in the same run, exercising the
+      # delete-before-upload path.
+      - name: Get and set last run
+        id: getset
+        uses: ./
         with:
-          mode: set
+          mode: get-and-set
+          key: ${{ env.KEY }}
+          retention-days: 7
+
+      - name: Check get-and-set outputs
+        env:
+          LAST_RUN: ${{ steps.getset.outputs.last-run }}
+          CURRENT_RUN: ${{ steps.getset.outputs.current-run }}
+        run: |
+          echo "last-run='$LAST_RUN' current-run='$CURRENT_RUN'"
+          [ -n "$CURRENT_RUN" ] || { echo "::error::current-run missing"; exit 1; }
+          if [ -n "$LAST_RUN" ] && [[ ! "$CURRENT_RUN" > "$LAST_RUN" ]]; then
+            echo "::error::current-run not newer than last-run"
+            exit 1
+          fi

@@ -9,16 +9,22 @@ const uploaded: { value?: string } = {};
 
 // Mock artifact client for both upload and download paths
 const downloadArtifactMock = jest.fn();
+const uploadArtifactMock = jest.fn();
+const deleteArtifactMock = jest.fn();
 jest.mock('@actions/artifact', () => {
   class MockArtifactClient {
-    async uploadArtifact(name: string, files: string[], _root?: string) {
+    async uploadArtifact(name: string, files: string[], root?: string, options?: unknown) {
+      uploadArtifactMock(name, files, root, options);
       const fs = require('fs');
       const filePath = files[0];
       uploaded.value = fs.readFileSync(filePath, 'utf8');
       return { id: 999, size: (uploaded.value || '').length, name };
     }
-    async downloadArtifact(id: number): Promise<{ downloadPath: string }> {
-      return downloadArtifactMock(id);
+    async downloadArtifact(id: number, options?: unknown): Promise<{ downloadPath: string }> {
+      return downloadArtifactMock(id, options);
+    }
+    async deleteArtifact(name: string) {
+      return deleteArtifactMock(name);
     }
   }
   return { DefaultArtifactClient: MockArtifactClient };
@@ -102,6 +108,9 @@ beforeEach(() => {
   listArtifactsMock.mockReset();
   listArtifactsMock.mockResolvedValue({ data: { artifacts: [] } });
   downloadArtifactMock.mockReset();
+  uploadArtifactMock.mockReset();
+  deleteArtifactMock.mockReset();
+  deleteArtifactMock.mockRejectedValue(new Error('Artifact not found'));
   coreMock.getInput.mockImplementation(
     (n: string) => process.env[`INPUT_${n.toUpperCase()}`] || '',
   );
@@ -165,6 +174,92 @@ test('alias modes getset & get_and_set behave like get-and-set', async () => {
   }
 });
 
+test('mode get-and-set with no prior artifact emits first-run true and uploads', async () => {
+  setInputs({ mode: 'get-and-set' });
+  await run();
+  expect(coreMock.setOutput).toHaveBeenCalledWith('first-run', 'true');
+  expect(coreMock.setOutput).toHaveBeenCalledWith('current-run', uploaded.value);
+  expect(uploaded.value).toBeTruthy();
+});
+
+test('mode get with existing artifact emits first-run false and does not upload', async () => {
+  const ts = new Date(Date.now() - 1000).toISOString();
+  mockRepoArtifact({ created_at: ts, content: ts });
+  setInputs({ mode: 'get' });
+  await run();
+  expect(coreMock.setOutput).toHaveBeenCalledWith('first-run', 'false');
+  expect(uploaded.value).toBeUndefined();
+});
+
+test('unknown mode warns and does not seed when no prior artifact', async () => {
+  setInputs({ mode: 'sett' });
+  await run();
+  expect(coreMock.warning).toHaveBeenCalledWith(expect.stringContaining("Unknown mode 'sett'"));
+  expect(coreMock.setOutput).toHaveBeenCalledWith('first-run', 'true');
+  expect(uploaded.value).toBeUndefined();
+});
+
+test('upload deletes any same-named artifact from this run first', async () => {
+  deleteArtifactMock.mockResolvedValueOnce({ id: 1 });
+  setInputs({ mode: 'set' });
+  await run();
+  expect(deleteArtifactMock).toHaveBeenCalledWith('last-run');
+  expect(deleteArtifactMock.mock.invocationCallOrder[0]).toBeLessThan(
+    uploadArtifactMock.mock.invocationCallOrder[0],
+  );
+  expect(coreMock.setFailed).not.toHaveBeenCalled();
+});
+
+test('key and retention-days inputs control artifact name and retention', async () => {
+  process.env.GITHUB_TOKEN = 'token';
+  setInputs({ mode: 'get-and-set', key: 'nightly', 'retention-days': '7' });
+  await run();
+  expect(listArtifactsMock).toHaveBeenCalledWith(expect.objectContaining({ name: 'nightly' }));
+  expect(deleteArtifactMock).toHaveBeenCalledWith('nightly');
+  expect(uploadArtifactMock).toHaveBeenCalledWith(
+    'nightly',
+    expect.any(Array),
+    expect.any(String),
+    { retentionDays: 7 },
+  );
+});
+
+test('invalid retention-days fails the action', async () => {
+  setInputs({ mode: 'set', 'retention-days': 'soon' });
+  await run();
+  expect(coreMock.setFailed).toHaveBeenCalledWith(expect.stringContaining('retention-days'));
+  expect(uploaded.value).toBeUndefined();
+});
+
+test('token input takes precedence over GITHUB_TOKEN env', async () => {
+  const ts = new Date(Date.now() - 1000).toISOString();
+  mockRepoArtifact({ created_at: ts, content: ts });
+  delete process.env.GITHUB_TOKEN;
+  setInputs({ mode: 'get', token: 'input-token' });
+  await run();
+  expect(coreMock.setOutput).toHaveBeenCalledWith('last-run', ts);
+  expect(downloadArtifactMock).toHaveBeenCalledWith(
+    expect.any(Number),
+    expect.objectContaining({ findBy: expect.objectContaining({ token: 'input-token' }) }),
+  );
+});
+
+test('missing token warns when retrieving', async () => {
+  setInputs({ mode: 'get' });
+  await run();
+  expect(coreMock.warning).toHaveBeenCalledWith(expect.stringContaining('No token available'));
+});
+
+test('download extracts into a temp directory, not the workspace', async () => {
+  const ts = new Date(Date.now() - 1000).toISOString();
+  mockRepoArtifact({ created_at: ts, content: ts });
+  setInputs({ mode: 'get' });
+  await run();
+  const options = downloadArtifactMock.mock.calls[0][1];
+  expect(options.path).toEqual(expect.stringContaining('last-run-'));
+  expect(options.path.startsWith(process.cwd())).toBe(false);
+});
+
 test('unknown mode defaults to get', async () => {
   const ts = '2030-01-01T00:00:00.000Z';
   jest.clearAllMocks();
@@ -223,9 +318,7 @@ test('expired artifacts ignored (no viable)', async () => {
   });
   setInputs({ mode: 'get' });
   await run();
-  expect(
-    (coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run'),
-  ).toBe(false);
+  expect((coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
 });
 test('missing timestamp file in artifact directory yields no output', async () => {
   jest.clearAllMocks();
@@ -303,9 +396,7 @@ test('listRepoArtifactsByName no token path returns empty (indirectly no output)
   jest.clearAllMocks();
   setInputs({ mode: 'get' });
   await run();
-  expect(
-    (coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run'),
-  ).toBe(false);
+  expect((coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
 });
 
 test('pattern-invalid timestamp triggers warning and no output', async () => {
