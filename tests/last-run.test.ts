@@ -1,21 +1,22 @@
 // Repo-level primary retrieval test suite
-import { run } from '../src/index';
-import * as core from '@actions/core';
+import { jest } from '@jest/globals';
+import fs from 'fs';
+import path from 'path';
+import { coreMockFactory } from './helpers/core-mock';
 
-jest.mock('@actions/core');
+jest.unstable_mockModule('@actions/core', coreMockFactory);
 
 // In-memory storage of last uploaded timestamp value (simulates contents of artifact before zipped on download)
 const uploaded: { value?: string } = {};
 
 // Mock artifact client for both upload and download paths
-const downloadArtifactMock = jest.fn();
-const uploadArtifactMock = jest.fn();
-const deleteArtifactMock = jest.fn();
-jest.mock('@actions/artifact', () => {
+const downloadArtifactMock = jest.fn<(...args: any[]) => any>();
+const uploadArtifactMock = jest.fn<(...args: any[]) => any>();
+const deleteArtifactMock = jest.fn<(...args: any[]) => any>();
+jest.unstable_mockModule('@actions/artifact', () => {
   class MockArtifactClient {
     async uploadArtifact(name: string, files: string[], root?: string, options?: unknown) {
       uploadArtifactMock(name, files, root, options);
-      const fs = require('fs');
       const filePath = files[0];
       uploaded.value = fs.readFileSync(filePath, 'utf8');
       return { id: 999, size: (uploaded.value || '').length, name };
@@ -31,15 +32,18 @@ jest.mock('@actions/artifact', () => {
 });
 
 // Mocks for repo-level listing & download
-const listArtifactsMock = jest.fn();
-jest.mock('@actions/github', () => ({
+const listArtifactsMock = jest.fn<(...args: any[]) => any>();
+jest.unstable_mockModule('@actions/github', () => ({
   getOctokit: () => ({
     rest: { actions: { listArtifactsForRepo: listArtifactsMock } },
   }),
   context: { repo: { owner: 'o', repo: 'r' } },
 }));
 
-const coreMock = core as jest.Mocked<typeof core>;
+// ESM mocks only apply to modules imported after they are registered
+const coreMock = jest.mocked(await import('@actions/core'));
+const ArtifactMod = await import('@actions/artifact');
+const { run } = await import('../src/main');
 
 function setInputs(inputs: Record<string, string>) {
   for (const [k, v] of Object.entries(inputs)) process.env[`INPUT_${k.toUpperCase()}`] = v;
@@ -47,8 +51,6 @@ function setInputs(inputs: Record<string, string>) {
 
 // Helper to simulate artifact download by writing extracted file directly into directory
 function writeArtifactDir(artifactId: number, content: string | null | undefined) {
-  const fs = require('fs');
-  const path = require('path');
   const dir = path.join(process.cwd(), `artifact-${artifactId}`);
   fs.mkdirSync(dir, { recursive: true });
   if (content !== null && content !== undefined) {
@@ -281,7 +283,7 @@ test('unknown mode defaults to get', async () => {
   mockRepoArtifact({ created_at: ts, content: ts });
   setInputs({ mode: 'mystery' });
   await run();
-  const calls = (coreMock.setOutput as jest.Mock).mock.calls.filter((c) => c[0] === 'last-run');
+  const calls = coreMock.setOutput.mock.calls.filter((c) => c[0] === 'last-run');
   expect(calls.length).toBe(1);
   const value = calls[0][1];
   // Must be a valid ISO timestamp
@@ -333,7 +335,7 @@ test('expired artifacts ignored (no viable)', async () => {
   });
   setInputs({ mode: 'get' });
   await run();
-  expect((coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
+  expect(coreMock.setOutput.mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
 });
 test('missing timestamp file in artifact directory yields no output', async () => {
   jest.clearAllMocks();
@@ -359,8 +361,6 @@ test('missing timestamp file in artifact directory yields no output', async () =
     },
   });
   downloadArtifactMock.mockImplementationOnce(async (artifactId: number) => {
-    const fs = require('fs');
-    const path = require('path');
     const dir = writeArtifactDir(artifactId, null); // create empty directory
     // Ensure no stray file exists from previous runs
     const file = path.join(dir, 'last-run.txt');
@@ -369,7 +369,7 @@ test('missing timestamp file in artifact directory yields no output', async () =
   });
   setInputs({ mode: 'get' });
   await run();
-  const outputs = (coreMock.setOutput as jest.Mock).mock.calls.filter((c) => c[0] === 'last-run');
+  const outputs = coreMock.setOutput.mock.calls.filter((c) => c[0] === 'last-run');
   // Should not have produced output when file missing
   expect(outputs.length).toBe(0);
 });
@@ -402,7 +402,7 @@ test('downloadArtifactArchive missing token after discovery returns null (no out
   delete process.env.GITHUB_TOKEN;
   setInputs({ mode: 'get' });
   await run();
-  expect((coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
+  expect(coreMock.setOutput.mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
 });
 
 test('listRepoArtifactsByName no token path returns empty (indirectly no output)', async () => {
@@ -411,7 +411,7 @@ test('listRepoArtifactsByName no token path returns empty (indirectly no output)
   jest.clearAllMocks();
   setInputs({ mode: 'get' });
   await run();
-  expect((coreMock.setOutput as jest.Mock).mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
+  expect(coreMock.setOutput.mock.calls.some((c) => c[0] === 'last-run')).toBe(false);
 });
 
 test('pattern-invalid timestamp triggers warning and no output', async () => {
@@ -421,13 +421,13 @@ test('pattern-invalid timestamp triggers warning and no output', async () => {
   setInputs({ mode: 'get' });
   await run();
   expect(coreMock.setOutput).not.toHaveBeenCalledWith('last-run', bad);
-  const warned = (coreMock.warning as jest.Mock).mock.calls.some((c) =>
+  const warned = coreMock.warning.mock.calls.some((c) =>
     String(c[0]).includes('Invalid timestamp format'),
   );
   // If pattern didn't trigger, then we expect generic missing warning
   if (!warned) {
     expect(
-      (coreMock.warning as jest.Mock).mock.calls.some((c) =>
+      coreMock.warning.mock.calls.some((c) =>
         String(c[0]).includes('No valid previous run timestamp'),
       ),
     ).toBe(true);
@@ -441,18 +441,15 @@ test('parse-invalid timestamp triggers warning and no output', async () => {
   setInputs({ mode: 'get' });
   await run();
   // Depending on engine, may parse; if it parses we accept output else we expect warning
-  const wasSet = (coreMock.setOutput as jest.Mock).mock.calls.some(
-    (c) => c[0] === 'last-run' && c[1] === bad,
-  );
+  const wasSet = coreMock.setOutput.mock.calls.some((c) => c[0] === 'last-run' && c[1] === bad);
   if (!wasSet) {
     expect(coreMock.warning).toHaveBeenCalled();
   }
 });
 
 test('upload failure surfaces via set mode', async () => {
-  const ArtifactMod = require('@actions/artifact');
   ArtifactMod.DefaultArtifactClient.prototype.uploadArtifact = jest
-    .fn()
+    .fn<(...args: any[]) => any>()
     .mockRejectedValue(new Error('boom-upload'));
   setInputs({ mode: 'set' });
   await run();

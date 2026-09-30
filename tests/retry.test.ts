@@ -1,21 +1,21 @@
-import { __test__ } from '../src/index';
+import { jest } from '@jest/globals';
+import { coreMockFactory } from './helpers/core-mock';
 
 // Mock GitHub API and core functions
-const listArtifactsForRepo = jest.fn();
+const listArtifactsForRepo = jest.fn<(...args: any[]) => any>();
 
-jest.mock('@actions/core', () => ({
-  debug: jest.fn(),
-  warning: jest.fn(),
-}));
+jest.unstable_mockModule('@actions/core', coreMockFactory);
 
-jest.mock('@actions/github', () => ({
+jest.unstable_mockModule('@actions/github', () => ({
   getOctokit: () => ({
     rest: { actions: { listArtifactsForRepo } },
   }),
   context: { repo: { owner: 'test-owner', repo: 'test-repo' } },
 }));
 
-const coreMock = require('@actions/core');
+// ESM mocks only apply to modules imported after they are registered
+const coreMock = await import('@actions/core');
+const { __test__ } = await import('../src/main');
 
 describe('retry functionality', () => {
   beforeEach(() => {

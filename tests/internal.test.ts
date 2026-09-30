@@ -1,9 +1,10 @@
-import { __test__ } from '../src/index';
+import { jest } from '@jest/globals';
 import { promises as fs } from 'fs';
 import path from 'path';
+import { coreMockFactory } from './helpers/core-mock';
 
-// Mock artifact client prior to import usage (hoisted)
-jest.mock('@actions/artifact', () => {
+// Mock artifact client; ESM mocks must be registered before importing src
+jest.unstable_mockModule('@actions/artifact', () => {
   class MockArtifactClient {
     // For these internal helper tests we only need downloadArtifact when token provided
     async downloadArtifact(id: number): Promise<{ downloadPath: string }> {
@@ -16,16 +17,18 @@ jest.mock('@actions/artifact', () => {
   return { DefaultArtifactClient: MockArtifactClient };
 });
 
-jest.mock('@actions/core');
+jest.unstable_mockModule('@actions/core', coreMockFactory);
 
 // Minimal mocks for github
-const listArtifactsForRepo = jest.fn();
-jest.mock('@actions/github', () => ({
+const listArtifactsForRepo = jest.fn<(...args: any[]) => any>();
+jest.unstable_mockModule('@actions/github', () => ({
   getOctokit: () => ({
     rest: { actions: { listArtifactsForRepo } },
   }),
   context: { repo: { owner: 'o', repo: 'r' } },
 }));
+
+const { __test__ } = await import('../src/main');
 
 // Zip helper removed after migration to direct directory artifact handling.
 
