@@ -23,7 +23,7 @@
   "author": "Ben Balter",
   "license": "MIT",
   "dependencies": {
-    "@actions/artifact": "^2.3.2",
+    "@actions/artifact": "^6.0.0",
     "@actions/core": "^1.11.1",
     "@actions/github": "^6.0.1",
     "async-retry": "^1.3.3"
