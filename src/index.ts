@@ -3,12 +3,13 @@ import * as core from '@actions/core';
 import { DefaultArtifactClient } from '@actions/artifact';
 import * as github from '@actions/github';
 import { promises as fs } from 'fs';
+import * as os from 'os';
 import * as path from 'path';
-import { RestEndpointMethodTypes } from '@octokit/plugin-rest-endpoint-methods';
 import retry from 'async-retry';
 
 // Constants for artifact management
-const ARTIFACT_NAME = 'last-run';
+const DEFAULT_ARTIFACT_NAME = 'last-run';
+const DEFAULT_RETENTION_DAYS = 90;
 const FILENAME = 'last-run.txt';
 
 const RETRY_OPTIONS = {
@@ -27,7 +28,7 @@ const RETRY_OPTIONS = {
  *   - `set`          : Store current timestamp (no output produced).
  *   - `get-and-set`  : Retrieve previous timestamp (output) then store a strictly newer timestamp.
  *   - Aliases `getset`, `get_and_set` behave like `get-and-set`.
- *   - Any unknown value quietly defaults to `get`.
+ *   - Any unknown value logs a warning and behaves like a read-only `get` (no first-run seeding).
  *
  * Failure semantics:
  *   When `fail-if-missing: true` and a valid prior timestamp cannot be retrieved, the action is
@@ -39,46 +40,45 @@ const RETRY_OPTIONS = {
  *   When `mode: get` is used and no prior timestamp exists (and `fail-if-missing` is false),
  *   the action automatically uploads a fresh timestamp to seed the repository artifact. This
  *   makes the common "since last run" pattern work on the very first invocation without
- *   requiring a separate `set` step. The `first-run` output is set to `'true'` in this case.
+ *   requiring a separate `set` step. The `first-run` output is `'true'` whenever a `get` finds
+ *   no prior timestamp, in both `get` and `get-and-set` modes.
  *
  * Monotonicity:
- *   In combined `get-and-set` modes a loop waits (at microsecond resolution governed by Date.now())
- *   until the newly generated ISO timestamp string is strictly greater than the previous to avoid
- *   duplicate values in extremely fast consecutive invocations.
+ *   When a previous timestamp exists, the stored value is at least 1ms later than it, so
+ *   consecutive values are strictly increasing even under clock skew or very fast re-runs.
  */
 export async function run(): Promise<void> {
   try {
     // Parse action inputs to determine what operations to perform
-    const { mode, failIfMissing, operations } = collectInputs();
+    const inputs = collectInputs();
+    const { mode, failIfMissing, operations } = inputs;
     core.debug(`Effective operations: ${JSON.stringify(operations)} (mode='${mode}')`);
 
     let retrieved: string | null = null;
-    let firstRun = false;
 
     // Retrieve previous timestamp if requested
     if (operations.get) {
       core.startGroup('Retrieve last run timestamp');
-      retrieved = await getLastRun(failIfMissing);
+      retrieved = await getLastRun(inputs);
       core.endGroup();
     }
 
-    // First-run seeding: if a caller only requested `get` and no prior timestamp
+    // Always expose a boolean first-run signal for downstream steps.
+    const firstRun = operations.get && !retrieved;
+    core.setOutput('first-run', firstRun ? 'true' : 'false');
+
+    // First-run seeding: if a caller explicitly requested `get` and no prior timestamp
     // exists (and we aren't failing the run), automatically upload a fresh
     // timestamp so the next run finds a baseline. This makes the common
     // "since last run" pattern work on the very first invocation without
-    // requiring the user to pre-seed via a separate `set` step.
-    if (operations.get && !operations.set && !retrieved && !failIfMissing) {
-      firstRun = true;
-      operations.set = true;
-    }
-
-    // Always expose a boolean first-run signal for downstream steps.
-    core.setOutput('first-run', firstRun && operations.get ? 'true' : 'false');
+    // requiring the user to pre-seed via a separate `set` step. Unknown modes
+    // never seed so a typo can't cause an unexpected write.
+    const seed = firstRun && mode === 'get' && !failIfMissing;
 
     // Store current timestamp if requested (or seed on first run)
-    if (operations.set) {
-      core.startGroup(firstRun ? 'Seed first run timestamp' : 'Store current timestamp');
-      await setLastRun(retrieved);
+    if (operations.set || seed) {
+      core.startGroup(seed ? 'Seed first run timestamp' : 'Store current timestamp');
+      await setLastRun(retrieved, inputs);
       core.endGroup();
     }
   } catch (error: any) {
@@ -93,6 +93,10 @@ interface CollectedInputs {
   mode: string;
   failIfMissing: boolean;
   operations: Operations;
+  /** Artifact name used to store the timestamp (input: `key`) */
+  artifactName: string;
+  retentionDays: number;
+  token: string | undefined;
 }
 
 /**
@@ -106,13 +110,41 @@ function collectInputs(): CollectedInputs {
   const mode = (modeRaw || 'get').toLowerCase(); // Default to 'get' mode
   const failIfMissing = core.getBooleanInput('fail-if-missing');
   const operations = deriveOperations(mode);
+  const key = core.getInput('key').trim();
+  const artifactName = sanitizeArtifactName(key) || DEFAULT_ARTIFACT_NAME;
+  if (key && artifactName !== key) {
+    core.debug(`collectInputs: normalized key '${key}' to artifact name '${artifactName}'`);
+  }
+
+  const retentionRaw = core.getInput('retention-days').trim();
+  const retentionDays = retentionRaw ? Number(retentionRaw) : DEFAULT_RETENTION_DAYS;
+  if (!Number.isInteger(retentionDays) || retentionDays < 1) {
+    throw new Error(`Invalid retention-days '${retentionRaw}': must be a positive integer.`);
+  }
+
+  const token = core.getInput('token') || process.env.GITHUB_TOKEN || undefined;
+  if (operations.get && !token) {
+    core.warning(
+      'No token available (set the `token` input or GITHUB_TOKEN env); the previous timestamp cannot be retrieved.',
+    );
+  }
 
   core.debug(
     `collectInputs: rawMode='${modeRaw}' normalized='${mode}' failIfMissing=${failIfMissing} operations=${JSON.stringify(
       operations,
-    )}`,
+    )} artifactName='${artifactName}' retentionDays=${retentionDays}`,
   );
-  return { mode, failIfMissing, operations };
+  return { mode, failIfMissing, operations, artifactName, retentionDays, token };
+}
+
+/**
+ * Replaces characters that artifact names may not contain (e.g. the `/` in branch names like
+ * `renovate/foo`) with `-`, so keys built from refs are always valid.
+ * @param key Raw `key` input
+ * @returns A valid artifact name (empty if the key was empty)
+ */
+export function sanitizeArtifactName(key: string): string {
+  return key.replace(/["\\/:<>|*?\r\n]/g, '-');
 }
 
 /**
@@ -125,14 +157,15 @@ function collectInputs(): CollectedInputs {
  *     in this function continues so a subsequent `set` operation in combined mode can still
  *     seed an initial timestamp for future runs).
  *
- * @param failIfMissing Whether to fail the action if no valid timestamp is found
+ * @param inputs Collected action inputs (failIfMissing, artifact name, token)
  * @returns The retrieved timestamp or null if not found/invalid
  */
-async function getLastRun(failIfMissing: boolean): Promise<string | null> {
+async function getLastRun(inputs: CollectedInputs): Promise<string | null> {
+  const { failIfMissing } = inputs;
   core.debug(`getLastRun: failIfMissing=${failIfMissing}`);
 
   // Download and validate the timestamp from artifacts
-  const retrieved = await downloadTimestampWithValidation();
+  const retrieved = await downloadTimestampWithValidation(inputs.artifactName, inputs.token);
   core.debug(`getLastRun: retrieved='${retrieved}'`);
 
   if (retrieved) {
@@ -151,43 +184,40 @@ async function getLastRun(failIfMissing: boolean): Promise<string | null> {
   }
   core.debug('getLastRun: missing timestamp but not failing');
   core.warning(
-    `${msg} Treating this as the first run and seeding a new timestamp so future runs have a baseline.`,
+    `${msg} Treating this as the first run; future runs will use the timestamp stored by this run.`,
   );
   return null;
 }
 
 /**
- * Stores the current UTC timestamp (`Date().toISOString()`) as an artifact named `last-run`.
- * If a previous timestamp was retrieved earlier in the run, guarantees the newly stored value
- * is lexicographically (and chronologically) greater by regenerating until strictly larger.
- *
- * Output note: By design, `set`-only flows do not emit an output; workflows that need the
- * previous value should use `get` first or the combined `get-and-set` mode.
+ * Stores the current UTC timestamp as an artifact and exposes it as the `current-run` output.
+ * If a previous timestamp was retrieved earlier in the run, the stored value is at least 1ms
+ * later than it (see {@link nextTimestamp}).
  *
  * @param previous Previously retrieved timestamp (or null) used to enforce monotonicity
+ * @param inputs Collected action inputs (artifact name, retention)
  */
-async function setLastRun(previous: string | null): Promise<void> {
+async function setLastRun(previous: string | null, inputs: CollectedInputs): Promise<void> {
   core.debug(`setLastRun: previous='${previous}'`);
 
-  let now = new Date().toISOString();
-
-  // Ensure monotonic increase when previous exists (avoid identical timestamps on fast successive sets)
-  if (previous) {
-    // Loop until we get a strictly greater ISO string (lexicographically greater since format is sortable)
-    let safeguard = 0;
-    while (now <= previous && safeguard < 1000) {
-      now = new Date().toISOString();
-      safeguard++;
-    }
-    if (safeguard > 0) {
-      core.debug(`setLastRun: waited ${safeguard} iterations to ensure monotonic timestamp`);
-    }
-  }
+  const now = nextTimestamp(previous);
 
   core.debug(`setLastRun: uploading timestamp ${now}`);
-  await uploadTimestamp(now);
+  await uploadTimestamp(now, inputs.artifactName, inputs.retentionDays);
+  core.setOutput('current-run', now);
   core.info(`Stored last run timestamp: ${now}`);
-  // Design choice: output only set during get / get-and-set retrieval.
+}
+
+/**
+ * Returns the current time as an ISO string, bumped to 1ms after `previous` when needed so the
+ * stored value is always strictly greater (ISO strings sort chronologically).
+ * @param previous Previously stored timestamp (or null)
+ * @param nowMs Current epoch millis (injectable for tests)
+ */
+export function nextTimestamp(previous: string | null, nowMs: number = Date.now()): string {
+  const prevMs = previous ? Date.parse(previous) : NaN;
+  const ms = Number.isNaN(prevMs) ? nowMs : Math.max(nowMs, prevMs + 1);
+  return new Date(ms).toISOString();
 }
 
 /**
@@ -200,8 +230,8 @@ interface Operations {
 
 /**
  * Determines which operations to perform based on the specified mode string.
- * Recognizes canonical forms plus accepted aliases. Unknown values default to a safe
- * read-only retrieval (`get`). This conservative default avoids accidental writes.
+ * Recognizes canonical forms plus accepted aliases. Unknown values log a warning and default
+ * to a read-only retrieval (`get`); `run` skips first-run seeding for them to avoid accidental writes.
  * @param mode The operation mode ('get', 'set', 'get-and-set', alias, or unknown)
  * @returns Operations configuration indicating which actions to take
  */
@@ -213,43 +243,65 @@ function deriveOperations(mode: string): Operations {
   if (mode === 'get-and-set' || mode === 'getset' || mode === 'get_and_set')
     return { get: true, set: true };
 
-  // Default / unknown -> treat as get
-  core.debug('deriveOperations: defaulting to get');
+  // Default / unknown -> treat as read-only get
+  core.warning(
+    `Unknown mode '${mode}'; expected 'get', 'set', or 'get-and-set'. Falling back to read-only 'get'.`,
+  );
   return { get: true, set: false };
 }
 
 /**
- * Uploads a timestamp value as an artifact to GitHub Actions.
- * Creates a temporary file with the timestamp and uploads it with 90-day retention.
- * Implements exponential backoff retry for upload failures.
- * @param value The ISO timestamp string to upload
+ * Creates a fresh private directory under RUNNER_TEMP (or the OS temp dir) so artifact files
+ * never land in, or collide with, the user's workspace.
  */
-export async function uploadTimestamp(value: string): Promise<void> {
+async function makeTempDir(): Promise<string> {
+  const base = process.env['RUNNER_TEMP'] || os.tmpdir();
+  return fs.mkdtemp(path.join(base, 'last-run-'));
+}
+
+/**
+ * Uploads a timestamp value as an artifact to GitHub Actions.
+ * Creates a temporary file with the timestamp and uploads it with the given retention.
+ * Any artifact of the same name already uploaded in this workflow run (e.g. a first-run
+ * seed from an earlier `get` step) is deleted first, since artifact names are immutable
+ * within a run. Implements exponential backoff retry for upload failures.
+ * @param value The ISO timestamp string to upload
+ * @param name Artifact name
+ * @param retentionDays Artifact retention in days
+ */
+export async function uploadTimestamp(
+  value: string,
+  name: string = DEFAULT_ARTIFACT_NAME,
+  retentionDays: number = DEFAULT_RETENTION_DAYS,
+): Promise<void> {
   core.debug(`uploadTimestamp: value='${value}'`);
 
   const client = new DefaultArtifactClient();
-  const tempDir = process.env['RUNNER_TEMP'] || process.cwd();
+  const tempDir = await makeTempDir();
   const filePath = path.join(tempDir, FILENAME);
 
   // Write timestamp to temporary file
   await fs.writeFile(filePath, value, 'utf8');
   core.debug(`uploadTimestamp: wrote file ${filePath}`);
 
-  // Upload the file as an artifact with 90-day retention
+  // Remove an artifact of the same name from this run, if any, so the upload doesn't conflict
+  try {
+    await client.deleteArtifact(name);
+    core.debug(`uploadTimestamp: deleted existing artifact '${name}' from this run`);
+  } catch (error: any) {
+    core.debug(`uploadTimestamp: no existing artifact deleted: ${error.message || error}`);
+  }
+
   await retry(async (bail: (err: Error) => void, attemptNumber: number) => {
     try {
-      await client.uploadArtifact(ARTIFACT_NAME, [filePath], tempDir, { retentionDays: 90 });
+      await client.uploadArtifact(name, [filePath], tempDir, { retentionDays });
     } catch (error: any) {
       core.debug(`uploadTimestamp: attempt ${attemptNumber} failed: ${error.message}`);
       throw error;
     }
   }, RETRY_OPTIONS);
-  core.debug(`uploadTimestamp: uploaded artifact '${ARTIFACT_NAME}'`);
+  core.debug(`uploadTimestamp: uploaded artifact '${name}'`);
 }
-
-// NOTE: Prior implementations attempted a per-run artifact short-circuit. That logic was
-// removed: repository-level lookup alone provides simpler, deterministic behavior and the
-// necessary cross-run persistence without extra branches.
 
 /**
  * Regular expression to validate ISO 8601 timestamp format.
@@ -279,11 +331,16 @@ export function validateIsoTimestamp(value: string | null | undefined): {
  * Downloads and validates a timestamp from the latest repository artifact (if any).
  * Combines artifact download with format validation to ensure data integrity. Invalid or
  * unparsable values produce warnings and are treated as missing rather than failing outright.
+ * @param name Artifact name
+ * @param token GitHub token used for the repository-level lookup
  * @returns A valid ISO timestamp string or null if download/validation fails
  */
-async function downloadTimestampWithValidation(): Promise<string | null> {
+async function downloadTimestampWithValidation(
+  name: string,
+  token: string | undefined,
+): Promise<string | null> {
   core.debug('downloadTimestampWithValidation: start');
-  const value = await downloadTimestamp();
+  const value = await downloadTimestamp(name, token);
   core.debug(`downloadTimestampWithValidation: raw='${value}'`);
   const validation = validateIsoTimestamp(value);
   core.debug(`downloadTimestampWithValidation: validation=${JSON.stringify(validation)}`);
@@ -299,8 +356,9 @@ async function downloadTimestampWithValidation(): Promise<string | null> {
   return value!;
 }
 
-type Artifact =
-  RestEndpointMethodTypes['actions']['listArtifactsForRepo']['response']['data']['artifacts'][number];
+type Artifact = Awaited<
+  ReturnType<ReturnType<typeof github.getOctokit>['rest']['actions']['listArtifactsForRepo']>
+>['data']['artifacts'][number];
 
 // Max pages to fetch when listing artifacts. With per_page=100 this caps the
 // defensive scan at 1000 artifacts. This guards against GitHub Actions API
@@ -318,10 +376,13 @@ const ARTIFACTS_PER_PAGE = 100;
  * returns mildly out-of-order results during eventual-consistency windows.
  * Implements exponential backoff retry for API failures on each page.
  * @param name The artifact name to search for (e.g., 'last-run')
+ * @param token GitHub token (defaults to GITHUB_TOKEN env)
  * @returns Array of matching artifact summaries, empty if none found or no token available
  */
-async function listRepoArtifactsByName(name: string): Promise<Artifact[]> {
-  const token = process.env.GITHUB_TOKEN;
+async function listRepoArtifactsByName(
+  name: string,
+  token: string | undefined = process.env.GITHUB_TOKEN,
+): Promise<Artifact[]> {
   if (!token) {
     core.debug('listRepoArtifactsByName: no token available, skipping repo-level lookup');
     return [];
@@ -370,13 +431,18 @@ async function listRepoArtifactsByName(name: string): Promise<Artifact[]> {
 /**
  * Downloads the timestamp from the latest repository artifact.
  * Orchestrates the process of finding, downloading, and extracting the timestamp.
+ * @param name Artifact name
+ * @param token GitHub token (defaults to GITHUB_TOKEN env)
  * @returns The extracted timestamp string or null if any step fails
  */
-export async function downloadTimestamp(): Promise<string | null> {
+export async function downloadTimestamp(
+  name: string = DEFAULT_ARTIFACT_NAME,
+  token: string | undefined = process.env.GITHUB_TOKEN,
+): Promise<string | null> {
   try {
-    const latest = await fetchLatestRepoArtifact();
+    const latest = await fetchLatestRepoArtifact(name, token);
     if (!latest) return null;
-    const dir = await downloadArtifactArchive(latest);
+    const dir = await downloadArtifactArchive(latest, token);
     if (!dir) return null;
     const filePath = path.join(dir, FILENAME);
     try {
@@ -396,10 +462,15 @@ export async function downloadTimestamp(): Promise<string | null> {
 /**
  * Finds the latest non-expired artifact with the specified name from the repository.
  * Sorts artifacts by creation date and returns the most recent one.
+ * @param name Artifact name
+ * @param token GitHub token (defaults to GITHUB_TOKEN env)
  * @returns Metadata for the latest artifact or null if none found
  */
-async function fetchLatestRepoArtifact(): Promise<Artifact | null> {
-  const artifacts = await listRepoArtifactsByName(ARTIFACT_NAME);
+async function fetchLatestRepoArtifact(
+  name: string = DEFAULT_ARTIFACT_NAME,
+  token: string | undefined = process.env.GITHUB_TOKEN,
+): Promise<Artifact | null> {
+  const artifacts = await listRepoArtifactsByName(name, token);
   if (!artifacts.length) {
     core.debug('fetchLatestRepoArtifact: no repo-level artifacts found');
     return null;
@@ -420,15 +491,17 @@ async function fetchLatestRepoArtifact(): Promise<Artifact | null> {
 }
 
 /**
- * Downloads an artifact archive from GitHub and saves it to a temporary file.
- * Uses the GitHub REST API to download the artifact as a ZIP file.
+ * Downloads and extracts an artifact into a fresh temporary directory.
  * Implements exponential backoff retry for download failures.
  * @param latest Metadata for the artifact to download
- * @returns Path to the downloaded ZIP file or null if download fails
+ * @param token GitHub token (defaults to GITHUB_TOKEN env)
+ * @returns Path to the extraction directory or null if download fails
  */
-async function downloadArtifactArchive(latest: Artifact): Promise<string | null> {
+async function downloadArtifactArchive(
+  latest: Artifact,
+  token: string | undefined = process.env.GITHUB_TOKEN,
+): Promise<string | null> {
   const artifact = new DefaultArtifactClient();
-  const token = process.env.GITHUB_TOKEN;
 
   if (!token) {
     core.debug('downloadArtifactArchive: missing token');
@@ -444,10 +517,12 @@ async function downloadArtifactArchive(latest: Artifact): Promise<string | null>
   };
 
   try {
+    const downloadDir = await makeTempDir();
     const { downloadPath } = await retry(
       async (bail: (err: Error) => void, attemptNumber: number) => {
         try {
           return await artifact.downloadArtifact(latest.id, {
+            path: downloadDir,
             findBy,
           });
         } catch (error: any) {
@@ -478,4 +553,6 @@ export const __test__ = {
   fetchLatestRepoArtifact,
   downloadArtifactArchive,
   validateIsoTimestamp,
+  nextTimestamp,
+  sanitizeArtifactName,
 };
