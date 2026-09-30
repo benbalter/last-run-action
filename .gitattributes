@@ -1,0 +1,3 @@
+# Commit ncc output byte-for-byte so the dist freshness check matches CI builds
+# (bundled deps such as tslib contain CRLF line endings)
+dist/** -text

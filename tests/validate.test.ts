@@ -1,4 +1,4 @@
-import { validateIsoTimestamp } from '../src/index';
+import { validateIsoTimestamp } from '../src/main';
 
 describe('validateIsoTimestamp', () => {
   test('returns ok for valid ISO timestamp', () => {
