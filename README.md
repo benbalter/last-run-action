@@ -1,7 +1,6 @@
 # Last Run Action
 
-Determine (and/or update) the last time a workflow ran by storing a timestamp in a reusable repository-level Actions artifact. Provides simple modes to read, write, or atomically
-read-then-write the value.
+Determine (and/or update) the last time a workflow ran by storing a timestamp in a reusable repository-level Actions artifact. Provides simple modes to read, write, or atomically read-then-write the value.
 
 ## Usage
 
@@ -51,8 +50,7 @@ steps:
 ## Inputs
 
 - `mode` (optional, default `get`): One of:
-  - `get` – read a previously stored timestamp and set the `last-run` output. Uploads only
-    to seed a baseline on the first run (see below).
+  - `get` – read a previously stored timestamp and set the `last-run` output. Uploads only to seed a baseline on the first run (see below).
   - `set` – store the current timestamp.
   - `get-and-set` – output the previous timestamp then upload a strictly newer timestamp.
     Aliases: `getset`, `get_and_set`.
@@ -73,30 +71,21 @@ steps:
 
 ## Outputs
 
-- `last-run`: The last time the workflow was run, in ISO 8601 format. Omitted on first run
-  (when there is no previously stored timestamp).
-- `first-run`: `'true'` when no prior timestamp was found; `'false'` otherwise. Only
-  meaningful for modes that include `get`.
-- `current-run`: The timestamp this step stored, in ISO 8601 format. Set whenever a
-  timestamp is uploaded (`set`, `get-and-set`, or first-run seeding).
+- `last-run`: The last time the workflow was run, in ISO 8601 format. Omitted on first run (when there is no previously stored timestamp).
+- `first-run`: `'true'` when no prior timestamp was found; `'false'` otherwise. Only meaningful for modes that include `get`.
+- `current-run`: The timestamp this step stored, in ISO 8601 format. Set whenever a timestamp is uploaded (`set`, `get-and-set`, or first-run seeding).
 
 ## First run behavior
 
-On the very first invocation there is no stored timestamp to retrieve. To make the common
-"do work since last run" pattern work without requiring a separate bootstrap step:
+On the very first invocation there is no stored timestamp to retrieve. To make the common "do work since last run" pattern work without requiring a separate bootstrap step:
 
-- With `mode: get` (default) and `fail-if-missing: false`: a warning is logged, the `last-run`
-  output is omitted, `first-run` is set to `'true'`, and the action automatically uploads the
-  current timestamp so the next run has a baseline. This requires `actions: write` permissions.
-- With `mode: get-and-set`: the previous value is absent (no `last-run` output), `first-run`
-  is set to `'true'`, and the new timestamp is uploaded as usual.
+- With `mode: get` (default) and `fail-if-missing: false`: a warning is logged, the `last-run` output is omitted, `first-run` is set to `'true'`, and the action automatically uploads the current timestamp so the next run has a baseline. This requires `actions: write` permissions.
+- With `mode: get-and-set`: the previous value is absent (no `last-run` output), `first-run` is set to `'true'`, and the new timestamp is uploaded as usual.
 - With `fail-if-missing: true`: the action fails; no seeding occurs.
 
-A `set` or `get-and-set` step later in the same run replaces the seed, so the two-step
-`get` … `set` pattern works on the first run too.
+A `set` or `get-and-set` step later in the same run replaces the seed, so the two-step `get` … `set` pattern works on the first run too.
 
-Downstream steps can guard first-run logic with `if: steps.last-run.outputs.first-run != 'true'`
-(or invert it to run one-time bootstrap work only on the first invocation).
+Downstream steps can guard first-run logic with `if: steps.last-run.outputs.first-run != 'true'` (or invert it to run one-time bootstrap work only on the first invocation).
 
 ## How it works
 
@@ -104,12 +93,9 @@ This Action stores the latest run timestamp in a single-file artifact:
 
 Artifact name: `last-run`, file inside: `last-run.txt` containing an ISO 8601 (UTC) timestamp.
 
-Retrieval performs a repository-level artifact listing filtered by name (the `key` input) and
-selects the newest non-expired artifact. Artifacts are downloaded into a temporary directory
-under `RUNNER_TEMP`, never into your workspace.
+Retrieval performs a repository-level artifact listing filtered by name (the `key` input) and selects the newest non-expired artifact. Artifacts are downloaded into a temporary directory under `RUNNER_TEMP`, never into your workspace.
 
-Because the timestamp is repository-wide state, overlapping runs of the same workflow can race.
-Add a `concurrency` group to workflows that use `set` or `get-and-set`:
+Because the timestamp is repository-wide state, overlapping runs of the same workflow can race. Add a `concurrency` group to workflows that use `set` or `get-and-set`:
 
 ```yaml
 concurrency:
@@ -121,9 +107,7 @@ concurrency:
 - Reading existing timestamp: `actions: read` (listing & downloading artifacts)
 - Writing new timestamp (modes `set`, `get-and-set`, or first-run seeding in `get`): `actions: write`
 
-If you attempt an upload without `actions: write`, the step will fail during the upload phase.
-To opt out of first-run seeding in `get` mode, set `fail-if-missing: true` (the action will
-fail instead) or pre-seed the repository with a `mode: set` step under `actions: write`.
+If you attempt an upload without `actions: write`, the step will fail during the upload phase. To opt out of first-run seeding in `get` mode, set `fail-if-missing: true` (the action will fail instead) or pre-seed the repository with a `mode: set` step under `actions: write`.
 
 ### Behavior summary
 
@@ -137,14 +121,11 @@ Aliases `getset` and `get_and_set` behave identically to `get-and-set`.
 
 ### Cross-run persistence rationale
 
-Repository-level artifacts provide durable (retention-limited) cross-run storage without polluting
-the Git history or relying on caches that can be evicted unpredictably. Expired artifacts are
-ignored. If none are available yet (first run), the timestamp is simply missing.
+Repository-level artifacts provide durable (retention-limited) cross-run storage without polluting the Git history or relying on caches that can be evicted unpredictably. Expired artifacts are ignored. If none are available yet (first run), the timestamp is simply missing.
 
 ### Fail-if-missing semantics
 
-`fail-if-missing: true` triggers failure when retrieval yields no valid timestamp. Invalid format
-or parse failure is treated the same as absence. In `get-and-set`, the upload still proceeds.
+`fail-if-missing: true` triggers failure when retrieval yields no valid timestamp. Invalid format or parse failure is treated the same as absence. In `get-and-set`, the upload still proceeds.
 
 ## Use cases
 
@@ -170,11 +151,8 @@ Using `mode: get-and-set` in a single step lets you capture the prior value and 
 
 ## Why not use the REST API to find the last run?
 
-Using timestamps avoids ambiguity around selectively filtered runs (e.g., dry runs) and does not
-depend on workflow conclusion states or external filtering (like environment variables) to discern
-the relevant "last" run.
+Using timestamps avoids ambiguity around selectively filtered runs (e.g., dry runs) and does not depend on workflow conclusion states or external filtering (like environment variables) to discern the relevant "last" run.
 
 ## Automated dependency updates
 
-This repository uses [Renovate](https://docs.renovatebot.com/) (see `renovate.json`) to keep npm
-dependencies and GitHub Actions up to date.
+This repository uses [Renovate](https://docs.renovatebot.com/) (see `renovate.json`) to keep npm dependencies and GitHub Actions up to date.
