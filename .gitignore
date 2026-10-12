@@ -4,3 +4,5 @@ lib
 *.zip
 *.txt
 coverage
+# Built at release time by script/release, never committed to main
+dist

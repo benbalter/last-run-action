@@ -52,6 +52,9 @@ jobs:
           path: coverage
 
   build:
+    # Kept under its old name because branch rules require a check called
+    # "Build & Dist Freshness". dist/ is no longer committed (script/release builds it),
+    # so this only checks that the bundle builds.
     name: Build & Dist Freshness
     runs-on: ubuntu-latest
     steps:
@@ -63,13 +66,8 @@ jobs:
           node-version: 24
           cache: 'npm'
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
       - name: Build Action bundle
         run: npm run build
-      - name: Verify dist is up to date
-        run: |
-          if ! git diff --quiet --exit-code -- dist; then
-            echo '::error::dist/ is not up to date. Run npm run build and commit the changes.'
-            git --no-pager diff -- dist
-            exit 1
-          fi
+      - name: Check the bundle exists
+        run: test -f dist/index.js

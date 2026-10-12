@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+#
+# Usage: script/release vX.Y.Z
+#
+# Builds dist/ and tags a release commit that contains it. dist/ isn't committed to main,
+# so each release tag points at a commit that sits on top of main's HEAD and adds only the
+# built bundle. main itself is never changed.
+#
+# Creates the annotated tag vX.Y.Z and moves the floating major tag vX to it, locally.
+# Pushing the tags is left to you: the script prints the commands.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+version="${1:-}"
+[[ "$version" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]] ||
+  die "usage: script/release vX.Y.Z (e.g. v1.2.0)"
+major="v${BASH_REMATCH[1]}"
+
+[[ "$(git symbolic-ref --quiet --short HEAD || true)" == "main" ]] ||
+  die "check out main first"
+[[ -z "$(git status --porcelain)" ]] ||
+  die "working tree isn't clean; commit or stash your changes first"
+
+git fetch --quiet origin main --tags
+[[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] ||
+  die "main isn't up to date with origin/main; run git pull (or push) first"
+! git rev-parse --quiet --verify "refs/tags/$version" > /dev/null ||
+  die "tag $version already exists"
+
+echo "==> Installing dependencies"
+npm ci
+
+echo "==> Building dist/"
+npm run build
+[[ -f dist/index.js ]] || die "build didn't produce dist/index.js"
+
+echo "==> Creating release commit"
+# Stage dist/ in a throwaway index so neither main nor the real index changes.
+# -f because dist/ is in .gitignore.
+tmp_index="$(mktemp)"
+trap 'rm -f "$tmp_index"' EXIT
+export GIT_INDEX_FILE="$tmp_index"
+git read-tree HEAD
+git add -f dist
+tree="$(git write-tree)"
+unset GIT_INDEX_FILE
+# commit-tree honors commit.gpgSign, so the release commit is signed like any other.
+commit="$(git commit-tree "$tree" -p HEAD -m "Release $version" -m "Adds the built dist/ bundle on top of $(git rev-parse --short HEAD).")"
+
+echo "==> Tagging $commit as $version and $major"
+git tag -m "Release $version" "$version" "$commit"
+git tag -f -m "Release $version" "$major" "$commit"
+
+cat <<EOF
+
+Tagged $version and moved $major locally. Nothing has been pushed.
+
+To publish, push the tags:
+
+  git push origin $version
+  git push --force origin $major
+
+Then, optionally, create the GitHub release:
+
+  gh release create $version --verify-tag --generate-notes
+EOF

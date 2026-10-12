@@ -156,3 +156,7 @@ Using timestamps avoids ambiguity around selectively filtered runs (e.g., dry ru
 ## Automated dependency updates
 
 This repository uses [Renovate](https://docs.renovatebot.com/) (see `renovate.json`) to keep npm dependencies and GitHub Actions up to date.
+
+## Releasing
+
+`dist/` isn't committed to `main`; it's built at release time. To cut a release, run `script/release vX.Y.Z` from an up-to-date, clean `main`. It installs dependencies, builds `dist/`, creates a release commit containing the bundle on top of `main`, tags it `vX.Y.Z`, and moves the floating major tag (e.g. `v1`) to it. It doesn't push or change `main`; it prints the `git push` and `gh release create` commands to run next.
